@@ -18,13 +18,22 @@ width and thickness, not read back from the solver):
      0.5 / 0.3 A in the branches, and the items over their IPC rating;
   2. two vias in parallel share the current, a track that ends on the middle
      of another joins it there, and a second source pad lowers the drop;
+     copper joins wherever it overlaps: a track end short of a pad by less
+     than its half-width, a track passing over a pad, two track ends that
+     overlap without meeting, a tee off the trunk's centreline; pads of one
+     part sharing a number are one terminal; a via's barrel spans the board
+     between its layers, from the stackup, else the board's thickness, else
+     an assumed 1.6 mm that the result names;
   3. a copper pour is solved as a sheet: a strip of pour between two pads
      that span it reads rho * L / (W * t), and a pour in parallel with a
      track lowers the drop;
   4. what is not solved is said: a load with no path to a source, a pad
-     reference that is not on the net, thermal spokes;
-  5. the command prints the report, writes it as JSON, exits 0, and refuses
-     a missing or malformed loads file by name.
+     reference that is not on the net, thermal spokes; a solve that leaves a
+     load out is INCOMPLETE, its worst drop the other loads' alone, and the
+     command says so in text and JSON and exits 1;
+  5. the command prints the report, writes it as JSON, exits 0 when the
+     report is complete, and refuses a missing or malformed loads file by
+     name.
 """
 import contextlib
 import io
@@ -57,7 +66,13 @@ def r_track(length_mm, width_mm):
 
 
 def r_via(drill_mm=0.2, height_mm=1.6):
-    return RHO * height_mm * 1e-3 / (math.pi * (drill_mm - WALL) * WALL * 1e-6)
+    # the drill is the finished hole: the wall is the ring outside it
+    return RHO * height_mm * 1e-3 / (math.pi * (drill_mm + WALL) * WALL * 1e-6)
+
+
+def ipc2152(area_mm2, rise=10.0):
+    """IPC-2152's external fit, I = 0.048 dT^0.44 A^0.725, A in mils^2."""
+    return 0.048 * rise ** 0.44 * (area_mm2 / 0.0254 ** 2) ** 0.725
 
 
 BRANCH = math.hypot(3, 2)
@@ -84,12 +99,16 @@ def _via(x, y, net='+3V3'):
             f'\t\t(layers "F.Cu" "B.Cu")\n\t\t(net "{net}")\n\t)\n')
 
 
-def load(td, name, add='', drop=()):
-    """The fixture, with ``add`` appended and each (x1 y1) track start in
-    ``drop`` -- as (start, end) texts -- removed, parsed."""
+def load(td, name, add='', drop=(), sub=()):
+    """The fixture, with each (old, new) text of ``sub`` replaced once,
+    ``add`` appended and each (x1 y1) track start in ``drop`` -- as (start,
+    end) texts -- removed, parsed."""
     import re
     with open(evidence(BOARD + '.kicad_pcb'), encoding='utf-8') as fh:
         t = fh.read()
+    for old, new in sub:
+        assert t.count(old) == 1, f'the fixture carries {old!r} once'
+        t = t.replace(old, new)
     for start, end in drop:
         t, n = re.subn(r'\t\(segment\s*\(start %s\)\s*\(end %s\).*?\n\t\)\n'
                        % (re.escape(start), re.escape(end)), '', t, flags=re.S)
@@ -129,9 +148,16 @@ def fixture(td):
        f"track currents by width: {amps}")
     over = sorted((s['width_mm'], round(s['current_a'], 3)) for s in res['segments']
                   if s['over'])
+    # by hand: 0.10 mm track 0.45 A, 0.15 mm 0.60 A, and the 0.2 mm via's
+    # barrel (pi * 0.225 * 0.025 mm^2) 1.45 A, on one IPC-2152 basis
+    via_rating = ipc2152(math.pi * (0.2 + WALL) * WALL)
     ok(over == [(0.1, 0.5), (0.15, 0.8), (0.15, 0.8)]
-       and all(v['over'] for v in res['vias']) and res['over'] == 5,
-       f"over their rating: tracks {over} and both vias; the 0.3 A branch is not")
+       and not any(v['over'] for v in res['vias']) and res['over'] == 3
+       and all(near(v['rating_a'], via_rating, 1e-3) for v in res['vias'])
+       and all(near(s['rating_a'], ipc2152(s['width_mm'] * 0.035), 1e-3)
+               for s in res['segments']),
+       f"over their rating: tracks {over}; the 0.3 A branch and the vias, rated "
+       f"{res['vias'][0]['rating_a']} A (by hand {via_rating:.4f}), are not")
     ok(not res['not_modelled'] and not res['errors'], "nothing is left out of this solve")
 
 
@@ -167,6 +193,109 @@ def networks(td):
                          + 1 / r_track(BRANCH, 0.1)) + 0.5 * r_track(BRANCH, 0.1) * 1e3)
        and drops(two)['U1.1'] < drops(one)['U1.1'],
        f"a second source in parallel lowers the drop: {drops(two)['U1.1']} mV")
+
+
+def _part(ref, x, y, pads):
+    """A footprint at (x, y) with 0.4 mm round F.Cu pads ``(number, dx, dy)``."""
+    body = ''.join(f'\t\t(pad "{num}" smd circle\n\t\t\t(at {dx} {dy})\n\t\t\t(size 0.4 0.4)\n'
+                   f'\t\t\t(layers "F.Cu")\n\t\t\t(net "+3V3")\n\t\t)\n'
+                   for num, dx, dy in pads)
+    return (f'\t(footprint "P"\n\t\t(layer "F.Cu")\n\t\t(at {x} {y})\n'
+            f'\t\t(property "Reference" "{ref}"\n\t\t\t(at 0 0 0)\n'
+            f'\t\t\t(layer "F.SilkS")\n\t\t)\n{body}\t)\n')
+
+
+def shared_numbers(td):
+    print("2c. pads of one part that share a number are one pin")
+    # U4 has two pads numbered 1, 4 mm apart; each runs its own track to U5.1
+    twin = (_part('U4', 30, 8, [('1', 0, -2), ('1', 0, 2)]) + _part('U5', 40, 8, [('1', 0, 0)])
+            + _seg(30, 6, 40, 8) + _seg(30, 10, 40, 8))
+    pcb, nid, _ = load(td, 'n', twin)
+    half = r_track(math.hypot(10, 2), 0.15) / 2.0 * 1e3
+    res = power_drop.solve_net(pcb, nid, ['U4.1'], {'U5.1': 1.0})
+    ok(near(drops(res)['U5.1'], half) and res['complete'],
+       f"a source names both pads of its number, so the two tracks share the current: "
+       f"{drops(res)['U5.1']} mV (by hand {half:.4f}, one track alone {2 * half:.4f})")
+    res = power_drop.solve_net(pcb, nid, ['U5.1'], {'U4.1': 1.0})
+    amps = sorted(round(s['current_a'], 6) for s in res['segments'] if s['start'][0] == 30)
+    ok(near(drops(res)['U4.1'], half) and amps == [0.5, 0.5],
+       f"a load draws through both pads of its number: {drops(res)['U4.1']} mV, "
+       f"track currents {amps}")
+
+
+_STACKUP = ('\t(setup\n\t\t(stackup\n'
+            '\t\t\t(layer "F.Cu"\n\t\t\t\t(type "copper")\n\t\t\t\t(thickness 0.035)\n\t\t\t)\n'
+            '\t\t\t(layer "dielectric 1"\n\t\t\t\t(type "core")\n\t\t\t\t(thickness 0.8)\n\t\t\t)\n'
+            '\t\t\t(layer "B.Cu"\n\t\t\t\t(type "copper")\n\t\t\t\t(thickness 0.035)\n\t\t\t)\n'
+            '\t\t)\n')
+
+
+def via_heights(td):
+    print("2d. a via's barrel spans the board between the layers it joins")
+    branch = r_track(BRANCH, 0.1)
+
+    def u1(height):
+        trunk = r_track(12, 0.15) + r_track(7, 0.15) + 2 * r_via(height_mm=height)
+        return (0.8 * trunk + 0.5 * branch) * 1e3
+    # a stackup: F.Cu's centre to B.Cu's, 0.0175 + 0.8 + 0.0175 mm
+    pcb, nid, _ = load(td, 'h1', sub=(('\t(setup\n', _STACKUP),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    ok(near(drops(res)['U1.1'], u1(0.835)) and res['via_height_from'] == 'stackup'
+       and not res['not_modelled'],
+       f"from the stackup, 0.835 mm: {drops(res)['U1.1']} mV (by hand {u1(0.835):.4f})")
+    # no stackup: the board's declared thickness
+    pcb, nid, _ = load(td, 'h2', sub=(('(thickness 1.6)', '(thickness 1.0)'),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    ok(near(drops(res)['U1.1'], u1(1.0)) and res['via_height_from'] == 'board thickness'
+       and not res['not_modelled'],
+       f"from the board's thickness, 1.0 mm: {drops(res)['U1.1']} mV "
+       f"(by hand {u1(1.0):.4f})")
+    # neither: 1.6 mm, and the result says it was assumed
+    pcb, nid, _ = load(td, 'h3', sub=(('\t\t(thickness 1.6)\n', ''),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    ok(near(drops(res)['U1.1'], u1(1.6)) and res['via_height_from'] == 'assumed'
+       and any('via height' in n and '1.6 mm' in n for n in res['not_modelled']),
+       f"neither: 1.6 mm assumed and said so: {drops(res)['U1.1']} mV, "
+       f"{res['not_modelled']}")
+
+
+def overlaps(td):
+    print("2b. copper joins where it overlaps, as KiCad connects it")
+    trunk = r_track(12, 0.15) + r_track(7, 0.15) + 2 * r_via()
+    # U1's branch ends 0.04 mm short of its 0.4 mm pad: the 0.1 mm track's
+    # copper still overlaps the pad's
+    pcb, nid, _ = load(td, 'o1', _seg(22, 6, 25, 4.24, w=0.1), drop=(('22 6', '25 4'),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    want = (0.8 * trunk + 0.5 * r_track(math.hypot(3, 1.76), 0.1)) * 1e3
+    ok(near(drops(res)['U1.1'], want),
+       f"a track ending within its half-width of a pad joins it: "
+       f"{drops(res)['U1.1']} mV (by hand {want:.4f})")
+    # U1's branch runs on past the pad's centre, with no end on the pad
+    pcb, nid, _ = load(td, 'o2', _seg(22, 6, 26.5, 3, w=0.1), drop=(('22 6', '25 4'),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    want = (0.8 * trunk + 0.5 * r_track(BRANCH, 0.1)) * 1e3
+    ok(near(drops(res)['U1.1'], want),
+       f"a track passing over a pad is cut there and joins it: "
+       f"{drops(res)['U1.1']} mV (by hand {want:.4f})")
+    # the B.Cu trunk as two tracks whose ends overlap 0.05 mm without meeting
+    pcb, nid, _ = load(td, 'o3', _seg(15, 6, 18.5, 6, 'B.Cu') + _seg(18.6, 6, 22, 6, 'B.Cu'),
+                       drop=(('15 6', '22 6'),))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
+    want = (0.8 * (trunk - r_track(0.1, 0.15)) + 0.5 * r_track(BRANCH, 0.1)) * 1e3
+    ok(near(drops(res)['U1.1'], want),
+       f"two track ends whose copper overlaps join: {drops(res)['U1.1']} mV "
+       f"(by hand {want:.4f})")
+    # a spur ending 0.06 mm off the F.Cu trunk's centreline, inside its copper
+    pad = ('\t(footprint "L"\n\t\t(layer "F.Cu")\n\t\t(at 9 9)\n'
+           '\t\t(property "Reference" "U3"\n\t\t\t(at 0 0 0)\n\t\t\t(layer "F.SilkS")\n\t\t)\n'
+           '\t\t(pad "1" smd circle\n\t\t\t(at 0 0)\n\t\t\t(size 0.4 0.4)\n'
+           '\t\t\t(layers "F.Cu")\n\t\t\t(net "+3V3")\n\t\t)\n\t)\n')
+    pcb, nid, _ = load(td, 'o4', pad + _seg(9, 6.06, 9, 9))
+    res = power_drop.solve_net(pcb, nid, ['J1.1'], {'U3.1': 0.2})
+    want = 0.2 * (r_track(6, 0.15) + r_track(2.94, 0.15)) * 1e3
+    ok(near(drops(res)['U3.1'], want),
+       f"a tee ending within the trunk's half-width joins it: {drops(res)['U3.1']} mV "
+       f"(by hand {want:.4f})")
 
 
 def _pad_b(ref, x, y):
@@ -219,7 +348,7 @@ def pours(td):
 
 def disclosed(td):
     print("4. what is not solved is said")
-    pcb, nid, _ = load(td, 'u', drop=(('22 6', '25 4'),))        # U1's branch
+    pcb, nid, cut_path = load(td, 'u', drop=(('22 6', '25 4'),))        # U1's branch
     res = power_drop.solve_net(pcb, nid, ['J1.1'], LOADS)
     rows = {r['pad']: r for r in res['loads']}
     cut = [p for p, r in rows.items() if r.get('unreached')]
@@ -227,11 +356,34 @@ def disclosed(td):
        and any('no copper path' in n for n in res['not_modelled'])
        and res['total_current_a'] == 0.3 and 'drop_mv' in rows['U2.1'],
        f"a load cut off from the source is unreached, with no number: {cut}")
+    # U2 alone on the trunk reads 0.3 A of drop, not the 0.8 A it shares
+    alone = (0.3 * (r_track(12, 0.15) + r_track(7, 0.15) + 2 * r_via())
+             + 0.3 * r_track(BRANCH, 0.1)) * 1e3
+    ok(res['complete'] is False and res['stated_current_a'] == 0.8
+       and any('U1.1' in w for w in res['incomplete'])
+       and near(res['max_drop_mv'], alone),
+       f"the solve is INCOMPLETE and its worst drop is U2's alone, {res['max_drop_mv']} "
+       f"mV (by hand {alone:.4f}): {res['incomplete']}")
+    whole = power_drop.solve_net(*load(td, 'w')[:2], ['J1.1'], LOADS)
+    ok(whole['complete'] is True and whole['incomplete'] == [],
+       "the whole fixture's solve is complete")
     res = power_drop.solve_net(pcb, nid, ['J9.1'], {'U1.1': 0.5, 'R7.2': 0.1})
     ok(any('J9.1 is not a pad' in e for e in res['errors'])
        and any('R7.2 is not a pad' in e for e in res['errors'])
-       and any('no source pad' in e for e in res['errors']),
-       f"references that are not pads of the net are errors: {res['errors']}")
+       and any('no source pad' in e for e in res['errors'])
+       and res['complete'] is False,
+       f"references that are not pads of the net are errors, and incomplete: "
+       f"{res['errors']}")
+    out = os.path.join(td, 'cut.json')
+    r = check(PY + [TOOL, cut_path, '--loads', evidence(BOARD + '.loads.json'),
+                    '--json', out], refuse='REPORT INCOMPLETE', code=1)
+    with open(evidence(out, 'the JSON report'), encoding='utf-8') as fh:
+        doc = json.load(fh)
+    ok('+3V3: INCOMPLETE -- 0.3 of 0.8 A solved' in r.stdout
+       and 'reads low' in r.stdout and 'INCOMPLETE: 1 load(s)' in r.stdout
+       and doc['complete'] is False and doc['nets'][0]['complete'] is False,
+       "the command marks the net and the report INCOMPLETE, in text and JSON, "
+       "and exits 1")
 
 
 def command(td):
@@ -240,17 +392,19 @@ def command(td):
     loads = evidence(BOARD + '.loads.json')
     r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', loads, '--json', out],
               accept=True)
-    ok('worst drop 60.4 mV' in r.stdout and 'U1.1: 0.5 A, drop 60.4 mV' in r.stdout
+    ok('worst drop 59.7 mV' in r.stdout and 'U1.1: 0.5 A, drop 59.7 mV' in r.stdout
        and 'OVER' in r.stdout and '(assumed)' in r.stdout,
        "the report gives the drops, flags what is over, and says the plating is assumed")
     with open(evidence(out, 'the JSON report'), encoding='utf-8') as fh:
         doc = json.load(fh)
     ok(doc['nets'][0]['net'] == '+3V3' and len(doc['nets'][0]['vias']) == 2
-       and doc['via_plating_assumed'] is True, "the JSON carries the same solve")
+       and doc['via_plating_assumed'] is True and doc['complete'] is True
+       and 'INCOMPLETE' not in r.stdout,
+       "the JSON carries the same solve, complete, and the command exits 0")
     r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', loads, '--via-plating-um', '18'],
               accept=True)
     ok('18 um plating' in r.stdout and '(assumed)' not in r.stdout
-       and 'worst drop 60.4 mV' not in r.stdout,
+       and 'worst drop 59.7 mV' not in r.stdout,
        "a stated plating is used and no longer called assumed")
     check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', os.path.join(td, 'none.json')],
           refuse='loads file not found', code=3)
@@ -263,14 +417,19 @@ def command(td):
     other = os.path.join(td, 'other.json')
     with open(other, 'w', encoding='utf-8') as fh:
         fh.write('{"nets": {"+9V": {"sources": ["J1.1"], "loads": {"U1.1": 1}}}}')
-    r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', other], accept=True)
-    ok('+9V: not a net of this board' in r.stdout, "a net the board lacks is named")
+    r = check(PY + [TOOL, BOARD + '.kicad_pcb', '--loads', other],
+              refuse='REPORT INCOMPLETE', code=1)
+    ok('+9V: INCOMPLETE -- not a net of this board' in r.stdout,
+       "a net the board lacks is named, and the report is incomplete")
 
 
 def main():
     with tempfile.TemporaryDirectory() as td:
         fixture(td)
         networks(td)
+        overlaps(td)
+        shared_numbers(td)
+        via_heights(td)
         pours(td)
         disclosed(td)
         command(td)

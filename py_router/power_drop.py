@@ -9,8 +9,18 @@ This module builds the net's copper into a resistor network and solves it:
   * a track segment is a resistor, rho * length / (width * thickness), its
     thickness the layer's own copper weight (`stackup_copper_oz`);
   * a via is a barrel resistor between each pair of neighbouring layers it is
-    joined on, rho * height / (pi * (drill + plating) * plating);
-  * a pad is a junction: every track end and via on its copper meets there.
+    joined on, rho * height / (pi * (drill + plating) * plating) -- the drill
+    is the finished hole, the plating the wall around it -- rated on the
+    same IPC-2152 basis as a track of that cross-section;
+  * a pad is a junction: every track, via and pad whose copper meets its
+    copper joins there. Pads of one part that share a number are one pin,
+    joined as one terminal: a source or a load named REF.PAD is all of them.
+
+Copper joins where it OVERLAPS, as KiCad connects it: a track meets a pad,
+a via, or another track wherever their copper touches -- a track end short
+of a pad's edge by less than its half-width, a track passing over a pad, two
+fat tracks whose ends overlap without meeting, a tee within half-width. A
+contact part-way along a track cuts the track there.
 
 The sources are held at 0 V of drop and each load draws its stated current;
 the node voltages are the drops. Report-only: nothing reads the result to
@@ -31,41 +41,106 @@ import math
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from plane_resistance import (COPPER_RESISTIVITY, OZ_TO_METERS, stackup_copper_oz,
-                              calculate_max_current_ipc2152,
-                              calculate_max_current_ipc2221)
+                              calculate_max_current_ipc2152)
 
 #: plated barrel wall of a via, mm (IPC-6012 class 2 asks an average of 20 um;
 #: fabs quote 18-25). A stated assumption: `via_plating_mm` overrides it.
 DEFAULT_VIA_PLATING_MM = 0.025
-#: board thickness assumed for a via's height when the board has no stackup
+#: board thickness assumed for a via's height when the board declares neither
+#: a stackup nor a thickness (said so in the result)
 DEFAULT_BOARD_THICKNESS_MM = 1.6
 #: side of a pour's mesh cell, mm: fine enough that a 0.5 mm neck is two cells
 DEFAULT_POUR_MESH_MM = 0.25
-#: two track ends, or a track end and a via or pad centre, closer than this
-#: are one junction (the connectivity checker's coincidence scale)
+#: slack on every copper-overlap test, and the length under which a piece of
+#: track is a junction rather than a resistor (the connectivity checker's
+#: coincidence scale)
 JOIN_TOL_MM = 0.002
+#: side of the bucket grid that finds the tracks near a pad, via or track
+_GRID_MM = 2.0
 
 
 def pad_ref(pad) -> str:
     return f"{pad.component_ref}.{pad.pad_number}"
 
 
-def _layer_heights(pcb_data) -> Dict[str, float]:
-    """{copper layer: depth of its centre below the top copper, mm}."""
-    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
-    stackup = getattr(pcb_data.board_info, 'stackup', None) or []
-    depth, out, started = 0.0, {}, False
+def via_barrel_area_mm2(drill_mm: float, plating_mm: float) -> float:
+    """Cross-section of a via's plated barrel, mm^2. The drill is the
+    finished hole and the plating its wall, so the copper is the ring between
+    diameters drill and drill + 2 * plating: pi * (drill + plating) * plating."""
+    plating_mm = max(plating_mm, 1e-6)
+    return math.pi * (max(drill_mm, 0.0) + plating_mm) * plating_mm
+
+
+def layer_heights(pcb_data) -> Tuple[Dict[str, float], str]:
+    """({copper layer: depth of its centre below the top copper's, mm}, where
+    the depths come from). A via's barrel between two layers is the span
+    between their depths. From the stackup's own copper and dielectrics when
+    it lists every copper layer ('stackup'); else the board's declared
+    thickness (`board_info.board_thickness`), the copper layers spread evenly
+    through it ('board thickness'); else DEFAULT_BOARD_THICKNESS_MM
+    ('assumed')."""
+    info = pcb_data.board_info
+    copper = list(getattr(info, 'copper_layers', None) or [])
+    stackup = getattr(info, 'stackup', None) or []
+    depth, out, top = 0.0, {}, None
     for entry in stackup:
         t = float(getattr(entry, 'thickness', 0.0) or 0.0)
         if entry.layer_type == 'copper':
-            out[entry.name] = depth + t / 2.0
-            started = True
-        if started:
+            if top is None:
+                top = t / 2.0
+            out[entry.name] = depth + t / 2.0 - top
+        if top is not None:
             depth += t
-    if len(out) >= len(copper) and copper:
-        return out
+    if copper and all(layer in out for layer in copper):
+        return {layer: out[layer] for layer in copper}, 'stackup'
+    thickness = getattr(info, 'board_thickness', None)
+    source = 'board thickness'
+    if not thickness or thickness <= 0:
+        thickness, source = DEFAULT_BOARD_THICKNESS_MM, 'assumed'
     n = max(len(copper) - 1, 1)
-    return {layer: i * DEFAULT_BOARD_THICKNESS_MM / n for i, layer in enumerate(copper)}
+    return {layer: i * thickness / n for i, layer in enumerate(copper)}, source
+
+
+class _SegGrid:
+    """Bucket grid of track segments per layer, each under its copper's box."""
+
+    def __init__(self, segs):
+        self.cells: Dict[Tuple[str, int, int], List[int]] = {}
+        for j, s in enumerate(segs):
+            r = s.width / 2.0
+            for key in self._keys(s.layer, min(s.start_x, s.end_x) - r,
+                                  min(s.start_y, s.end_y) - r,
+                                  max(s.start_x, s.end_x) + r,
+                                  max(s.start_y, s.end_y) + r):
+                self.cells.setdefault(key, []).append(j)
+
+    @staticmethod
+    def _keys(layer, x0, y0, x1, y1):
+        for i in range(int(math.floor(x0 / _GRID_MM)), int(math.floor(x1 / _GRID_MM)) + 1):
+            for j in range(int(math.floor(y0 / _GRID_MM)), int(math.floor(y1 / _GRID_MM)) + 1):
+                yield layer, i, j
+
+    def near(self, layer, x0, y0, x1, y1) -> List[int]:
+        """Segments of ``layer`` whose box meets the box (x0, y0)-(x1, y1)."""
+        found = set()
+        for key in self._keys(layer, x0, y0, x1, y1):
+            found.update(self.cells.get(key, ()))
+        return sorted(found)
+
+
+def _crossing(s, t) -> Optional[Tuple[float, float]]:
+    """Where the centrelines of segments ``s`` and ``t`` properly cross."""
+    from geometry_utils import segments_intersect
+    if not segments_intersect(s.start_x, s.start_y, s.end_x, s.end_y,
+                              t.start_x, t.start_y, t.end_x, t.end_y):
+        return None
+    ax, ay = s.end_x - s.start_x, s.end_y - s.start_y
+    bx, by = t.end_x - t.start_x, t.end_y - t.start_y
+    den = ax * by - ay * bx
+    if abs(den) < 1e-12:
+        return None
+    u = ((t.start_x - s.start_x) * by - (t.start_y - s.start_y) * bx) / den
+    return s.start_x + u * ax, s.start_y + u * ay
 
 
 class _Network:
@@ -94,55 +169,53 @@ class _Network:
         self.edges.append(dict(what, a=a, b=b, ohms=ohms))
 
 
-def _point_on_segment(px, py, s, slack: float) -> Optional[float]:
-    """Parameter t in (0, 1) where (px, py) lies on segment ``s``'s
-    centreline within ``slack``, strictly between its ends; else None."""
-    dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
-    l2 = dx * dx + dy * dy
-    if l2 <= 0:
-        return None
-    t = ((px - s.start_x) * dx + (py - s.start_y) * dy) / l2
-    if t <= 0 or t >= 1:
-        return None
-    if math.hypot(px - (s.start_x + t * dx), py - (s.start_y + t * dy)) > slack:
-        return None
-    length = math.sqrt(l2)
-    if t * length <= JOIN_TOL_MM or (1 - t) * length <= JOIN_TOL_MM:
-        return None
-    return t
-
-
 def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, float],
               via_plating_mm: float = DEFAULT_VIA_PLATING_MM,
               temp_rise_c: float = 10.0,
               pour_mesh_mm: float = DEFAULT_POUR_MESH_MM) -> dict:
     """Solve one net. ``sources`` are pad references ("J1.1") held at 0 V of
-    drop; ``loads`` maps a pad reference to the current it draws, in A.
+    drop; ``loads`` maps a pad reference to the current it draws, in A. A
+    reference names every pad of that part with that number, as one terminal.
 
     Returns a dict: `loads` (each with `drop_mv`, or `unreached` when no
     copper path joins it to a source), `vias` and `segments` (each
     with `current_a`, `rating_a`, `over`), `total_current_a`,
-    `max_drop_mv`, `pours` (each pour solved: layer, cells, mesh),
-    `not_modelled` (what was left out of the solve) and `errors`
-    (references that are not pads of the net)."""
-    from check_drc import point_to_pad_distance, pad_copper_layers
-    from geometry_utils import via_copper_layers
+    `stated_current_a`, `max_drop_mv`, `pours` (each pour solved: layer,
+    cells, mesh), `not_modelled` (what was left out of the solve), `errors`
+    (references that are not pads of the net), and `complete` with
+    `incomplete` (why not). A solve is INCOMPLETE when a stated load is left
+    out -- no copper path to a source, or not a pad of the net -- or the net
+    has no source: the other loads are then solved as if it drew nothing, so
+    `max_drop_mv` and every current read low."""
+    from check_drc import (point_to_pad_distance, pad_copper_layers, pad_copper_gap,
+                           segment_pad_gap)
+    from geometry_utils import via_copper_layers, point_to_segment_distance
     import numpy as np
 
     copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
-    heights = _layer_heights(pcb_data)
+    heights, heights_from = layer_heights(pcb_data)
     net = pcb_data.nets.get(net_id)
     net_name = net.name if net else f"net_{net_id}"
     pads = [p for p in (getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id, [])
             if getattr(p, 'pad_type', '') != 'np_thru_hole']
-    by_ref = {pad_ref(p): p for p in pads}
+    # pads of one part that share a number are one pin: a source or a load
+    # names every one of them, joined as one terminal
+    by_ref: Dict[str, List[int]] = {}
+    for k, p in enumerate(pads):
+        by_ref.setdefault(pad_ref(p), []).append(k)
     segs = [s for s in pcb_data.segments if s.net_id == net_id
             and not getattr(s, 'graphic', False) and s.width and s.width > 0
             and s.layer in copper]
     vias = [v for v in pcb_data.vias if v.net_id == net_id]
     result = {'net': net_name, 'loads': [], 'vias': [], 'segments': [], 'pours': [],
               'errors': [], 'not_modelled': [], 'via_plating_mm': via_plating_mm,
-              'temp_rise_c': temp_rise_c, 'resistivity_ohm_m': COPPER_RESISTIVITY}
+              'temp_rise_c': temp_rise_c, 'resistivity_ohm_m': COPPER_RESISTIVITY,
+              'stated_current_a': round(sum(float(a) for a in loads.values()), 6),
+              'via_height_from': heights_from}
+    if vias and heights_from == 'assumed':
+        result['not_modelled'].append(
+            f"via height: the board declares neither a stackup nor a thickness, so "
+            f"each barrel spans {DEFAULT_BOARD_THICKNESS_MM:g} mm of assumed board")
     for ref in list(sources) + list(loads):
         if ref not in by_ref:
             result['errors'].append(f"{ref} is not a pad of {net_name}")
@@ -162,69 +235,131 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
         for other in ids[1:]:
             nw.join(ids[0], other)
         pad_nodes.append(nodes)
+    for members in by_ref.values():
+        firsts = [next(iter(pad_nodes[k].values())) for k in members if pad_nodes[k]]
+        for other in firsts[1:]:
+            nw.join(firsts[0], other)
     via_nodes: List[Dict[str, int]] = []
     for v in vias:
         via_nodes.append({layer: nw.node() for layer in via_copper_layers(v, copper)})
 
-    # every point a track is cut at: its own ends, and each track end, via or
-    # pad centre that lands on it between its ends
+    # every point a track is cut at: its own ends, and each contact with other
+    # copper part-way along it
     cuts: List[List[Tuple[float, int]]] = []
     ends: List[Tuple[int, int]] = []
+    lengths: List[float] = []
     for s in segs:
         a, b = nw.node(), nw.node()
         ends.append((a, b))
         cuts.append([(0.0, a), (1.0, b)])
-    by_layer: Dict[str, List[int]] = {}
-    for i, s in enumerate(segs):
-        by_layer.setdefault(s.layer, []).append(i)
+        lengths.append(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y))
+    grid = _SegGrid(segs)
+    widest = max((s.width for s in segs), default=0.0)
 
-    def attach(px, py, layer, node, reach=0.0):
-        """Join ``node`` to every track of ``layer`` passing (px, py)."""
-        for j in by_layer.get(layer, ()):
+    def seg_ends(j):
+        s = segs[j]
+        return (((s.start_x, s.start_y), ends[j][0]), ((s.end_x, s.end_y), ends[j][1]))
+
+    def node_at(j, px, py) -> int:
+        """The node of track ``j`` at the point of its centreline nearest
+        (px, py): one of its ends within JOIN_TOL_MM, else a new cut."""
+        s = segs[j]
+        if lengths[j] <= JOIN_TOL_MM:
+            return ends[j][0]
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        t = ((px - s.start_x) * dx + (py - s.start_y) * dy) / (lengths[j] ** 2)
+        t = min(1.0, max(0.0, t))
+        if t * lengths[j] <= JOIN_TOL_MM:
+            return ends[j][0]
+        if (1.0 - t) * lengths[j] <= JOIN_TOL_MM:
+            return ends[j][1]
+        node = nw.node()
+        cuts[j].append((t, node))
+        return node
+
+    def near_box(layer, x0, y0, x1, y1, reach):
+        return grid.near(layer, x0 - reach, y0 - reach, x1 + reach, y1 + reach)
+
+    # track to track: an end of one inside the other's copper (an end on an
+    # end, a tee, two fat ends overlapping), else centrelines that cross
+    for i, s in enumerate(segs):
+        hw = s.width / 2.0
+        for j in near_box(s.layer, min(s.start_x, s.end_x), min(s.start_y, s.end_y),
+                          max(s.start_x, s.end_x), max(s.start_y, s.end_y),
+                          hw + widest / 2.0 + JOIN_TOL_MM):
+            if j <= i:
+                continue
             t = segs[j]
-            for (ex, ey), end in (((t.start_x, t.start_y), ends[j][0]),
-                                  ((t.end_x, t.end_y), ends[j][1])):
-                if math.hypot(px - ex, py - ey) <= reach + JOIN_TOL_MM:
-                    nw.join(node, end)
-            at = _point_on_segment(px, py, t, t.width / 2.0 + JOIN_TOL_MM)
-            if at is not None:
-                cuts[j].append((at, node))
+            reach = hw + t.width / 2.0 + JOIN_TOL_MM
+            touched = False
+            for mine, other in ((i, j), (j, i)):
+                o = segs[other]
+                for (ex, ey), end in seg_ends(mine):
+                    if point_to_segment_distance(ex, ey, o.start_x, o.start_y,
+                                                 o.end_x, o.end_y) <= reach:
+                        nw.join(end, node_at(other, ex, ey))
+                        touched = True
+            if not touched:
+                at = _crossing(s, t)
+                if at is not None:
+                    nw.join(node_at(i, *at), node_at(j, *at))
 
-    for i, s in enumerate(segs):
-        for (px, py), end in (((s.start_x, s.start_y), ends[i][0]),
-                              ((s.end_x, s.end_y), ends[i][1])):
-            attach(px, py, s.layer, end)
+    # via to track: the via's copper disc on a layer meets the track's copper
     for v, nodes in zip(vias, via_nodes):
+        r = v.size / 2.0
         for layer, node in nodes.items():
-            attach(v.x, v.y, layer, node, reach=v.size / 2.0)
-    for p, nodes in zip(pads, pad_nodes):
-        for layer, node in nodes.items():
-            for j in by_layer.get(layer, ()):
+            for j in near_box(layer, v.x, v.y, v.x, v.y, r + widest / 2.0 + JOIN_TOL_MM):
                 t = segs[j]
-                for (ex, ey), end in (((t.start_x, t.start_y), ends[j][0]),
-                                      ((t.end_x, t.end_y), ends[j][1])):
-                    if point_to_pad_distance(ex, ey, p) <= JOIN_TOL_MM:
+                if point_to_segment_distance(v.x, v.y, t.start_x, t.start_y, t.end_x,
+                                             t.end_y) <= r + t.width / 2.0 + JOIN_TOL_MM:
+                    nw.join(node, node_at(j, v.x, v.y))
+
+    # pad to track, via and pad: wherever their copper meets the pad's. A
+    # track end within its half-width of the pad joins there; a track that
+    # only passes over the pad is cut at the point nearest the pad's centre
+    for k, (p, nodes) in enumerate(zip(pads, pad_nodes)):
+        reach_p = math.hypot(p.size_x, p.size_y) / 2.0
+        for layer, node in nodes.items():
+            for j in near_box(layer, p.global_x, p.global_y, p.global_x, p.global_y,
+                              reach_p + widest / 2.0 + JOIN_TOL_MM):
+                t = segs[j]
+                hw = t.width / 2.0 + JOIN_TOL_MM
+                if segment_pad_gap(t.start_x, t.start_y, t.end_x, t.end_y, p) > hw:
+                    continue
+                landed = False
+                for (ex, ey), end in seg_ends(j):
+                    if point_to_pad_distance(ex, ey, p) <= hw:
                         nw.join(node, end)
+                        landed = True
+                if not landed:
+                    nw.join(node, node_at(j, p.global_x, p.global_y))
             for v, vn in zip(vias, via_nodes):
-                if layer in vn and point_to_pad_distance(v.x, v.y, p) <= JOIN_TOL_MM:
+                if layer in vn and point_to_pad_distance(v.x, v.y, p) <= \
+                        v.size / 2.0 + JOIN_TOL_MM:
                     nw.join(node, vn[layer])
+            for q, qn in zip(pads[k + 1:], pad_nodes[k + 1:]):
+                if layer not in qn or math.hypot(q.global_x - p.global_x,
+                                                 q.global_y - p.global_y) > \
+                        reach_p + math.hypot(q.size_x, q.size_y) / 2.0 + JOIN_TOL_MM:
+                    continue
+                if pad_copper_gap(p, q) <= JOIN_TOL_MM:
+                    nw.join(node, qn[layer])
 
     # resistors
     for i, s in enumerate(segs):
-        length = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        length = lengths[i]
         oz = stackup_copper_oz(pcb_data, s.layer)
         ohm_per_mm = COPPER_RESISTIVITY / (s.width * 1e-3 * oz * OZ_TO_METERS) * 1e-3
         pts = sorted(cuts[i], key=lambda c: c[0])
         for (t0, n0), (t1, n1) in zip(pts, pts[1:]):
-            if t1 - t0 <= 0:
+            if (t1 - t0) * length <= JOIN_TOL_MM:
                 nw.join(n0, n1)
                 continue
             nw.resistor(n0, n1, ohm_per_mm * length * (t1 - t0), kind='segment',
                         index=i, part_mm=length * (t1 - t0))
     for k, (v, nodes) in enumerate(zip(vias, via_nodes)):
         on = [layer for layer in copper if layer in nodes]
-        wall = max(min(via_plating_mm, v.drill / 2.0), 1e-6)
-        area_mm2 = math.pi * (v.drill - wall) * wall if v.drill > wall else math.pi * wall * wall
+        area_mm2 = via_barrel_area_mm2(v.drill, via_plating_mm)
         for la, lb in zip(on, on[1:]):
             h = abs(heights.get(lb, 0.0) - heights.get(la, 0.0))
             ohms = COPPER_RESISTIVITY * (h * 1e-3) / (area_mm2 * 1e-6) if h > 0 else 0.0
@@ -313,10 +448,10 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
                     for c, x, y in cells_within(p.global_x, p.global_y, reach):
                         if point_to_pad_distance(x, y, p) <= side / 2.0:
                             nw.join(nodes[layer], c)
-                for j in by_layer.get(layer, ()):
-                    t = segs[j]
-                    for (ex, ey), end in (((t.start_x, t.start_y), ends[j][0]),
-                                          ((t.end_x, t.end_y), ends[j][1])):
+                for j, t in enumerate(segs):
+                    if t.layer != layer:
+                        continue
+                    for (ex, ey), end in seg_ends(j):
                         for c, _x, _y in cells_within(ex, ey, t.width / 2.0):
                             nw.join(end, c)
                 result['pours'].append({'layer': layer, 'cells': count,
@@ -341,8 +476,11 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
         return idx[nw.find(node)]
 
     def pad_node(ref):
-        nodes = pad_nodes[pads.index(by_ref[ref])]
-        return nid(next(iter(nodes.values()))) if nodes else None
+        """The terminal of ``ref``: every pad of that part and number."""
+        for k in by_ref[ref]:
+            if pad_nodes[k]:
+                return nid(next(iter(pad_nodes[k].values())))
+        return None
 
     src = {pad_node(r) for r in sources} - {None}
     adj: Dict[int, set] = {i: set() for i in range(n)}
@@ -427,10 +565,10 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
             'over': bool(amps > rating + 1e-9)})
     for k, amps in sorted(via_amps.items()):
         v = vias[k]
-        wall = max(min(via_plating_mm, v.drill / 2.0), 1e-6)
-        area_mm2 = math.pi * (v.drill - wall) * wall if v.drill > wall else math.pi * wall * wall
-        # the barrel as a conductor of that cross-section inside the board
-        rating = calculate_max_current_ipc2221(area_mm2 / (OZ_TO_METERS * 1e3), 1.0,
+        area_mm2 = via_barrel_area_mm2(v.drill, via_plating_mm)
+        # the barrel as a conductor of that cross-section, rated on the same
+        # IPC-2152 basis as a track: the width of 1 oz copper of that area
+        rating = calculate_max_current_ipc2152(area_mm2 / (OZ_TO_METERS * 1e3), 1.0,
                                                temp_rise_c, True)
         result['vias'].append({
             'at': (v.x, v.y), 'size_mm': v.size, 'drill_mm': v.drill,
@@ -442,6 +580,11 @@ def solve_net(pcb_data, net_id: int, sources: Iterable[str], loads: Dict[str, fl
     result['max_drop_mv'] = max(drops) if drops else None
     result['over'] = (sum(1 for r in result['segments'] if r['over'])
                       + sum(1 for r in result['vias'] if r['over']))
+    unreached = [r['pad'] for r in result['loads'] if r.get('unreached')]
+    result['incomplete'] = (
+        [f"{len(unreached)} load(s) with no copper path to a source: "
+         + ', '.join(unreached)] if unreached else []) + list(result['errors'])
+    result['complete'] = not result['incomplete']
     return result
 
 

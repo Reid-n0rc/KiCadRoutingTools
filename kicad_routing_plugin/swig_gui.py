@@ -773,6 +773,12 @@ class RoutingDialog(wx.Dialog):
             return defaults.ESCALATION
         return ctrl.GetString(ctrl.GetSelection()) or defaults.ESCALATION
 
+    def _board_thickness(self):
+        """The live board's thickness in mm (BoardInfo.board_thickness), for
+        the drill aspect-ratio floor (#502); None when unknown."""
+        return getattr(getattr(getattr(self, 'pcb_data', None), 'board_info', None),
+                       'board_thickness', None)
+
     def _board_floor_dict(self):
         """The live board's Board Setup minimums in fab_tiers FLOOR_KEYS
         vocabulary (only keys declared > 0), for --escalation board."""
@@ -1328,7 +1334,8 @@ class RoutingDialog(wx.Dialog):
             tier = self.fab_tier.GetString(self.fab_tier.GetSelection())
             path = self.fab_overrides_path.GetValue().strip()
             ovr = parse_fab_overrides(path) if path and os.path.isfile(path) else {}
-            return fab_floor_for_param(ctrl_name, ncu, tier, ovr)
+            return fab_floor_for_param(ctrl_name, ncu, tier, ovr,
+                                       thickness=self._board_thickness())
         except Exception:
             return None
 
@@ -1456,6 +1463,15 @@ class RoutingDialog(wx.Dialog):
             "After a successful route, delete the guide graphics from the guide layer so you "
             "can draw new ones. Only acts when 'Follow User-layer guide path' is enabled.")
         options_inner.Add(self.clear_guide_layer_check, 0, wx.ALL, 3)
+
+        # Mask artwork keep-outs (route.py --mask-keepouts)
+        self.mask_keepouts = wx.CheckBox(options_scroll, label="Keep out of mask artwork")
+        self.mask_keepouts.SetValue(defaults.MASK_KEEPOUTS)
+        self.mask_keepouts.SetToolTip(
+            "Keep new copper out from under F.Mask/B.Mask graphics and footprint mask "
+            "shapes on the same side (pad openings excepted). On by default; the artwork "
+            "is read from the saved board file.")
+        options_inner.Add(self.mask_keepouts, 0, wx.ALL, 3)
 
         # Keepout zone: keep tracks out of a user-drawn polygon (issue #27)
         self.keepout_check = wx.CheckBox(options_scroll, label="Keep out of User-layer polygon(s)")
@@ -2008,6 +2024,7 @@ class RoutingDialog(wx.Dialog):
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
+                'board_thickness': self._board_thickness(),  # #502
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -2066,6 +2083,12 @@ class RoutingDialog(wx.Dialog):
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
+                # #1842: the route tab's Via Span, as bga_fanout.py /
+                # qfn_fanout.py --via-span
+                'via_span': (self.via_span.GetValue().replace(',', ' ').split() or None),
+                'via_span_type': (self.via_span_type.GetStringSelection()
+                                  if self.via_span_type.GetStringSelection()
+                                  in ('micro', 'blind', 'buried') else None),
             }
 
         return FanoutTab(
@@ -2139,6 +2162,7 @@ class RoutingDialog(wx.Dialog):
                 'net_clearances_path': self.net_clearances_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
+                'board_thickness': self._board_thickness(),  # #502
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -3065,6 +3089,7 @@ class RoutingDialog(wx.Dialog):
         self.guide_corridor_spacing_ctrl.SetValue(str(defaults.GUIDE_CORRIDOR_SPACING))
         self.keepout_check.SetValue(defaults.KEEPOUT_ENABLED)
         self.keepout_layer_ctrl.SetValue(defaults.KEEPOUT_LAYER)
+        self.mask_keepouts.SetValue(defaults.MASK_KEEPOUTS)
         # "Fix DRC settings after routing" (#160/#693), ticked as the
         # constructor ticks it. A plan replays route.py's per-step semantics:
         # a step without --no-fix-drc-settings writes the DRC floors back, a
@@ -3391,6 +3416,7 @@ class RoutingDialog(wx.Dialog):
             'net_clearances_path': self.net_clearances_path.GetValue().strip(),
             'escalation': self._escalation_policy(),
             'board_floors': self._board_floor_dict(),
+            'board_thickness': self._board_thickness(),  # #502
             # #1262: what KiCad grades a Default net at when the DRC
             # settings writeback is off (fix_drc_settings False).
             'default_class_clearance': self._default_class_clearance(),
@@ -3432,6 +3458,7 @@ class RoutingDialog(wx.Dialog):
             'guide_corridor_spacing': self._safe_float(self.guide_corridor_spacing_ctrl.GetValue(), defaults.GUIDE_CORRIDOR_SPACING),
             # Keepout zone (issue #27)
             'keepout_enabled': self.keepout_check.GetValue(),
+            'mask_keepouts': self.mask_keepouts.GetValue(),
             'keepout_layer': self.keepout_layer_ctrl.GetValue().strip() or defaults.KEEPOUT_LAYER,
             # Clear User-layer graphics after a successful route (plugin-only)
             'clear_guide_layer': self.clear_guide_layer_check.GetValue(),
@@ -4006,6 +4033,7 @@ class RoutingDialog(wx.Dialog):
                     guide_corridor_layer=config.get('guide_corridor_layer', 'User.1'),
                     guide_corridor_spacing=config.get('guide_corridor_spacing', 0.0),
                     keepout_enabled=config.get('keepout_enabled', False),
+                    mask_keepouts=config.get('mask_keepouts', defaults.MASK_KEEPOUTS),
                     keepout_layer=config.get('keepout_layer', 'User.2'),
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),

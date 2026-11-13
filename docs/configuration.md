@@ -309,9 +309,10 @@ post-route pass, or already in the input) is printed and reported as
 clean; absent when the board has no such rule).
 
 **Clearance in a rule area.** A `.kicad_dru` clearance rule whose condition
-is one rule-area predicate, e.g.
+is one rule-area predicate or an OR of them, e.g.
 `(rule "room" (constraint clearance (min 0.09mm)) (condition "A.insideArea('ROOM')"))`
-on a named rule area `ROOM`, is routed to by position (no flag, no GUI
+or `"A.insideArea('SOC_ROOM') || A.insideArea('RAM_ROOM')"`
+on named rule areas, is routed to by position (no flag, no GUI
 control; `area_clearance.py`): a track inside the area, on a layer the area
 is drawn on, is held to the rule's value in place of the class value against
 everything, and so is a via where the area covers every copper layer of the
@@ -320,15 +321,39 @@ whose rule is ABOVE the run's clearance, a ring one rule value plus half a
 track wide keeps the larger of the two. The base obstacle map, the per-net
 keep-outs and the stamp functions all compose the two stamps, so rip-up and
 retry see the same picture, and the terminal check and the end-of-run pad
-audit hold a track in the area to the area's value. The run names the rule
+audit hold a track in the area to the area's value. The rule's value is raised to what the fab can physically
+make (the advanced rung, or `--fab-overrides`), as an explicit `--clearance`
+is, and the run says when it was. The run names the rule
 as routed to, and the DRC writeback keeps `rules.min_clearance` at or below
-it. Not routed to, and said so: a condition with more than the one predicate
-(`A.insideArea('ROOM') && A.NetClass == 'HS'`), `enclosedByArea()`, and a
-rule followed in the file by another clearance rule the router reads; a
-`track_width` rule in an area is graded by `check_drc.py` only. One limit of
+it. The rule is read in KiCad's order, the last matching rule winning: in
+the room it replaces the class values and every rule BEFORE it in the file,
+while a per-layer rule or a class-, type- or net-scoped rule that comes
+AFTER it still binds its own pairs there. Not routed to, and said so: a
+condition with more than rule-area predicates
+(`A.insideArea('ROOM') && A.NetClass == 'HS'`) and `enclosedByArea()`. One limit of
 a rule that tightens: a long track that crosses the area's edge is bound by
 the rule along its whole length in KiCad, and only the part near the area is
 held to it here, so grade such a board with `check_drc.py`.
+
+**Track width in a rule area.** A `track_width` rule with the same kind of
+condition gives the room a width, its `opt` value or else its `min`, raised
+to what the fab can physically make:
+`(rule "room" (constraint track_width (min 0.09mm)) (condition "A.insideArea('ROOM')"))`.
+Where it is narrower than the run's track, the keep-outs in the room reserve
+the narrower track, and a net routed no wider than the run's width may NECK
+to the room's width there: its track is drawn at the room's width only on
+the stretches where its own width would not keep the room's clearance (with
+half a grid step to spare), and at its own width everywhere else, so a
+controlled-width net is narrow between the balls it squeezes past and not
+for its whole run through the room. A neck starts at most 1.5 grid steps
+outside the room's edge, so the narrow piece is one KiCad holds to the rule.
+A net routed wider (a power width, an impedance width) keeps its width and
+gets the search margin that fits the room's reserve. Rules on one area are
+read together, so one room can set both a clearance and a width; a room's
+width is not routed to when a later `track_width` rule asks for a wider
+track. A necked track is graded at the rule and not at Board Setup's
+`min_track_width` (measured on kicad-cli 10.0.8), so the DRC writeback
+leaves that minimum alone, on both fronts.
 
 **Track bans.** A `disallow track` rule scoped without a rule area -- the usual
 way to keep a class on some layers, e.g.
@@ -385,6 +410,10 @@ span allows. The whole stack is no span: through vias, as without the flag.
   via as well.) `route` lays the escapes and then routes
   within the span. A pad whose net already has copper on the span's other
   layers nearby is left alone, as is a drilled pad.
+- **A step on a partial span does not run the plane finalize.** The
+  finalize's taps are through vias at the step's via size, which under a
+  micro, blind or buried span is not a through via's; the run says so, and
+  the plane step connects the plane nets.
 - **Copper outside the span is held in place.** A via-span step lays copper on
   the span only, so it could not lay an escape's stub and via again: every
   existing track on another layer, and every via with copper on a layer the
@@ -399,9 +428,30 @@ span allows. The whole stack is no span: through vias, as without the flag.
   python3 py_router/route.py escaped.kicad_pcb routed.kicad_pcb --nets "S*" \
       --via-span In1.Cu In6.Cu
   ```
+- **The diff-pair step takes the span too.** `route_diff.py --via-span TOP
+  BOTTOM` (and `--via-span-type`) has the same meaning: the pairs route on
+  that run of layers, their layer-change vias join exactly it, and only
+  copper on those layers and drilled pads blocks a via site. With no
+  `--layers` the pairs route on the span's layers. GND return vias are laid
+  only when a pour of the ground net is on a layer the span has (a return
+  via that stops short of its plane is not laid, and the run says so).
+- **The fan-out steps take the span too.** `bga_fanout.py --via-span TOP
+  BOTTOM` escapes the part on that run of layers, with its vias (in the pad
+  or beside it, whichever the engine picks) joining exactly it;
+  `qfn_fanout.py --via-span` does the same for its via drops. The part's
+  layer must be one end of the span. The fan-out engines measure each via
+  site off the board themselves, so for the call the board carries only the
+  copper the span has (`via_span.only_span_copper`: pads and tracks on other
+  layers are set aside and put back, drilled pads stay), and a pad on the
+  far side of the board under a ball no longer blocks that ball's via. With
+  no `--layers` the escape uses the span's layers, and a micro span with no
+  via size draws the Default class's micro via. Measured on a top-side
+  BGA. Not separately measured: a back-side part, and the QFN via drops,
+  which go through the same mechanism. A plane-ball drop is a via of the
+  span like any other, so it reaches a plane only on a layer the span has.
 - The GUI route tab has the same three controls (**Via Span**, the type and
-  the escape mode beside it). The fan-out, diff-pair and plane steps lay
-  through vias only.
+  the escape mode beside it), and the differential and fan-out tabs read the
+  span from them. The plane steps lay through vias only.
 
 On an 8-layer board with a 0.8 mm BGA over a field of bottom-side pads
 (`tests/fixtures/1842`), a bare route completes 25 of 36 nets with through
@@ -601,6 +651,21 @@ python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overri
 floor (the standard tier with the `--fab-overrides` file overlaid when one is given,
 else the advanced rung: 0.25/0.15 via, track/clearance 0.10/0.10 on 2-layer and
 0.0762/0.09 on 4+) and **pinned** up to it with a warning when set below.
+**Drill aspect ratio (#502).** On a board more than 10% thicker than the
+thickness a fab floor's via drill is legal at (a fab holds a board's thickness to
++-10%, so the stock rungs move only past 1.76 mm) that drill is raised to
+`thickness / ratio`, the ratio being the tier's own floor drill at
+the 1.6 mm reference a fab quotes it for (standard 8:1 = 1.6 / 0.20, advanced
+10.67:1 = 1.6 / 0.15), and the via grows to keep its ring: on a 2.0 mm board the
+rungs are 0.50/0.25, 0.338/0.188 and 0.288/0.188. The thickness is
+`BoardInfo.board_thickness`; up to 1.76 mm, or unknown, nothing moves. A declared
+thickness past 3.2 mm, the thickest standard board, is taken for a stackup that was
+never set (KiCad gives each dielectric a layer adds 1.51 mm, so a 4-layer board left
+at its 2-layer stackup reads 4.67 mm): nothing is raised, and the run, `check_drc`
+and the `Design rules [...]` line warn (`aspect_floor.not_applied`). It holds the
+descents, the physical floor an explicit `--via-drill` is pinned to, and the drill
+`check_drc` grades a through via at, and the `Design rules [...]` line and
+`JSON_SUMMARY.design_rules.aspect_floor` state it. No flag or control.
 The selected tier and the board's own minimums bound what the router may descend to
 on its own, never an explicit request: `--via-size 0.3` under the hard `standard` tier
 is routed at 0.3 as asked (no automatic descent below it), exactly as a request below a
@@ -806,6 +871,29 @@ Notes:
   route_diff.py report what the routed board still has inside a forbidding rule
   area as `rule_area_keepouts` in `JSON_SUMMARY` / `--json-out` and the GUI's results (rows of
   area, net, tracks, vias; `[]` = clean; absent when the board has no such area).
+
+### Solder-Mask Artwork
+
+A graphic on `F.Mask` or `B.Mask` (a logo, a label, a window over an antenna or a shield frame)
+is a mask OPENING: copper under it ships bare. Routing keeps new tracks and vias of that side's
+copper out from under it, by default, with no setup: the board's own mask graphics and every
+footprint's mask shapes are read from the board file and stamped as keep-outs on `F.Cu` / `B.Cu`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--mask-keepouts` / `--no-mask-keepouts` | on | Keep new copper out from under mask artwork (route.py; GUI: "Keep out of mask artwork") |
+
+Notes:
+- A pad's own opening is exempt: every netted pad whose copper meets the artwork is cut out of
+  it, grown by 0.5 mm, so a mask-defined pad, a test point or an edge-connector finger stays
+  reachable.
+- The artwork is not copper, so copper keeps only 0.05 mm (mask registration) from it, not the
+  copper clearance.
+- Copper already on the board is left where it is; only the copper a run lays is kept out.
+- It reaches every engine that builds its map with the shared keep-out stamper: single-ended and
+  differential-pair routing and the plane steps. The BGA/QFN fanouts do not read it.
+  `--no-mask-keepouts` is on route.py only; use it on a board whose mask art is MEANT to show
+  the copper routed under it.
 - It's a non-copper User layer, so the polygon never affects manufacturing — it only steers the
   router.
 - **Don't draw a zone over a pad you need to route.** Cells inside the polygon are blocked

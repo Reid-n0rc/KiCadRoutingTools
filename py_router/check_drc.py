@@ -3886,7 +3886,7 @@ class _TimeDomain:
         self._args = (path, pcb_data, member)
         self._names = names
         self._model = None
-        self._zero: Dict[str, List[str]] = {}     # KiCad's own 0 ps, by reason
+        self._zero: Dict[str, List[str]] = {}     # no track/via delay, by reason
         self._unmodelled: set = set()
         self.used = False
 
@@ -3917,7 +3917,8 @@ class _TimeDomain:
               f"tuning profiles: each layer's delay, the via delay and the "
               f"pad-to-die delays (#1846)")
         for why, nets in sorted(self._zero.items()):
-            print(f"  ({kind}) {len(nets)} net(s) measure 0 ps, as in KiCad: {why} "
+            print(f"  ({kind}) {len(nets)} net(s) get no track or via delay, as in "
+                  f"KiCad: {why} "
                   f"({', '.join(sorted(nets)[:6])}{' ...' if len(nets) > 6 else ''})")
 
 
@@ -4903,7 +4904,7 @@ def _keepout_area_layers(ko, routing_layers):
 
 
 def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
-                   segments=None, vias=None):
+                   segments=None, vias=None, areas=None):
     """Copper inside a keep-out RULE AREA (`(zone ... (keepout ...))`).
 
     For every area in `pcb_data.board_info.keepouts` (board-level and
@@ -4920,7 +4921,9 @@ def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
     back from a keep-out by construction; pad and footprint rules are not
     modelled). `net_ids` (None = every net) restricts the items graded.
     `segments` / `vias` grade those items instead of the board's -- copper a
-    generator is about to lay (`keepout_refusal`).
+    generator is about to lay (`keepout_refusal`). `areas` grades those
+    regions, in the same form, instead of the board's rule areas (the
+    contact fingers, `contact_finger_areas`).
 
     One row per (item, area): `type` 'keepout', `item` 'track'/'via',
     `area` (the area's name, '' when it has none), `area_in_footprint`,
@@ -4935,7 +4938,9 @@ def keepout_census(pcb_data, routing_layers, tol=FP_EPS_MM, net_ids=None,
     copper's box meets, and the distances are one vectorized shapely call per
     area.
     """
-    kos = [ko for ko in (getattr(pcb_data.board_info, 'keepouts', None) or [])
+    if areas is None:
+        areas = getattr(pcb_data.board_info, 'keepouts', None) or []
+    kos = [ko for ko in areas
            if len(ko.get('polygon') or ()) >= 3
            and (not ko.get('tracks_allowed', True)
                 or not ko.get('vias_allowed', True))]
@@ -5199,12 +5204,27 @@ def _keepout_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
     for a track through a tracks-not-allowed rule area when we measured it
     (10.0.3 and 10.0.7 report one row per track inside, #1591), so
     kicad_drc_compare keeps these on a labelled channel of their own."""
+    _finger_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                 violations, accepted, tol, quiet)
     rows = keepout_census(pcb_data, routing_layers, tol=tol,
                           net_ids=matching_net_ids)
     inherited = set()
     if rows and baseline_pd is not None:
         inherited = {_keepout_key(r) for r in keepout_census(
             baseline_pd, routing_layers, tol=tol)}
+    n_viol, n_inh = _accept_inherited(rows, inherited, violations, accepted)
+    if quiet or not rows:
+        return
+    print("Copper in keep-out rule areas: %d (violations), %d inherited from "
+          "--baseline (accepted)%s" % (
+              n_viol, n_inh,
+              '; pass --baseline <input board> to accept the copper the board '
+              'already had there' if n_viol and baseline_pd is None else ''))
+
+
+def _accept_inherited(rows, inherited, violations, accepted):
+    """File each keep-out row as a violation, or as `inherited-keepout` when
+    its `_keepout_key` is in `inherited`. Returns (violations, inherited)."""
     n_viol = n_inh = 0
     for r in rows:
         if _keepout_key(r) in inherited:
@@ -5214,12 +5234,48 @@ def _keepout_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
         else:
             violations.append(r)
             n_viol += 1
+    return n_viol, n_inh
+
+
+def contact_finger_areas(pcb_data):
+    """The via-only regions over an edge connector's contact fingers
+    (#1116), as `keepout_census` reads an area: the regions the router keeps
+    vias out of (`net_keepouts.derive_contact_fingers`), so the router and
+    this grade cannot disagree about which pad is a finger. [] when the board
+    has none."""
+    from net_keepouts import derive_contact_fingers
+    return [dict(ko, in_footprint=True, contact_finger=True)
+            for ko in derive_contact_fingers(pcb_data)]
+
+
+def _finger_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,
+                 violations, accepted, tol, quiet):
+    """#1116: a via whose copper reaches into an edge connector's contact
+    finger, as a `keepout` row (`contact_finger` True) -- a drilled hole in
+    the plating the socket wipes against. No net is exempt, its own
+    included: KiCad sees a same-net via in a same-net pad as legal copper,
+    so this is check_drc's own finding, on kicad_drc_compare's keep-out
+    channel. A via the `--baseline` board already had there is accepted
+    `inherited-keepout`."""
+    areas = contact_finger_areas(pcb_data)
+    if not areas:
+        return
+    rows = keepout_census(pcb_data, routing_layers, tol=tol,
+                          net_ids=matching_net_ids, areas=areas)
+    for r in rows:
+        r['contact_finger'] = True
+    inherited = set()
+    if rows and baseline_pd is not None:
+        inherited = {_keepout_key(r) for r in keepout_census(
+            baseline_pd, routing_layers, tol=tol,
+            areas=contact_finger_areas(baseline_pd))}
+    n_viol, n_inh = _accept_inherited(rows, inherited, violations, accepted)
     if quiet or not rows:
         return
-    print("Copper in keep-out rule areas: %d (violations), %d inherited from "
-          "--baseline (accepted)%s" % (
+    print("Vias in an edge connector's contact fingers: %d (violations), "
+          "%d inherited from --baseline (accepted)%s" % (
               n_viol, n_inh,
-              '; pass --baseline <input board> to accept the copper the board '
+              '; pass --baseline <input board> to accept the vias the board '
               'already had there' if n_viol and baseline_pd is None else ''))
 
 
@@ -5933,7 +5989,7 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
         return val < c.kicad_min - 1e-9, c.min_rule
 
     from fab_tiers import physical_fab_floor
-    _fab = physical_fab_floor(len(board_copper) or 2)
+    _fab = physical_fab_floor(len(board_copper) or 2, thickness=None)
     _fab_gap = {'clearance': _fab.get('clearance'),
                 'shorting_items': _fab.get('clearance'),
                 'tracks_crossing': _fab.get('clearance'),
@@ -5944,7 +6000,11 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
     # smallest via implies)
     _fab_size = {'track-width': _fab.get('track_width') or 0.0,
                  'via-size': _fab.get('via_diameter') or 0.0,
-                 'via-drill-size': _fab.get('via_drill') or 0.0,
+                 # #502: held to the board thickness's aspect-ratio floor
+                 'via-drill-size': physical_fab_floor(
+                     len(board_copper) or 2, thickness=getattr(getattr(
+                         pcb_data, 'board_info', None), 'board_thickness', None)
+                 ).get('via_drill') or 0.0,
                  'via-annular': max(0.0, ((_fab.get('via_diameter') or 0.0)
                                           - (_fab.get('via_drill') or 0.0)) / 2.0)}
 
@@ -5954,6 +6014,8 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
             return False
         if v['type'] in CONTACT_TYPES:
             return True                          # crossing copper: gap 0
+        if key == 'hole_to_hole' and v.get('laser_drilled'):
+            return False                         # #1848: a mechanical-drill floor
         ov = v.get('overlap_mm')
         req = v.get('required_mm')
         if not isinstance(req, (int, float)):
@@ -5973,8 +6035,9 @@ def _severity_pass(pcb_file, pcb_data, violations, clearance, overrides,
         if v['type'] in _size_kinds:
             reports, rule = _size_rule(v)
             _val = v.get(_size_kinds[v['type']][2])
-            # #1844: the fab floor's via sizes do not bind a micro via
-            _fab_binds = not (v.get('via_type') == 'micro'
+            # #1844: the fab floor's via sizes do not bind a laser-drilled
+            # micro via (one joining two adjacent layers)
+            _fab_binds = not (v.get('laser_drilled')
                               and v['type'] in ('via-size', 'via-drill-size'))
             if not reports or (_fab_binds and isinstance(_val, (int, float))
                                and _val < _fab_size[v['type']] - 1e-9):
@@ -6813,8 +6876,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # minimums (below) are what KiCad grades. Only `--fab-overrides` moves
         # this floor; physical_fab_floor ignores the tier, so `--fab-tier`
         # changes nothing here.
-        from fab_tiers import physical_fab_floor
-        fab = physical_fab_floor(copper_count)
+        from fab_tiers import physical_fab_floor, aspect_ratio_for_drill
+        # #502: a through via's drill is held to the board thickness's
+        # aspect-ratio floor; a via drilled through less of the board is not
+        # (the drill alone: the diameter and ring floors stay the fab's)
+        _thick = getattr(pcb_data.board_info, 'board_thickness', None)
+        fab = physical_fab_floor(copper_count, thickness=None)
+        _drill_flat = fab['via_drill']
+        fab = dict(fab, via_drill=physical_fab_floor(copper_count, thickness=_thick)['via_drill'])
+        _aspect = (aspect_ratio_for_drill(_drill_flat, copper_count)
+                   if fab['via_drill'] > _drill_flat + 1e-9 else None)
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
         eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
         eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
@@ -6822,7 +6893,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # number route.py's enforce_fab_floors pins an explicit via up to.
         # Diameter and drill pass one at a time, so without this a via whose
         # drill is wider than its pad graded clean.
-        eff_min_via_ring = max(0.0, (fab['via_diameter'] - fab['via_drill']) / 2.0)
+        eff_min_via_ring = max(0.0, (fab['via_diameter'] - _drill_flat) / 2.0)
         # #530: the board's OWN size minimums -- Board Setup rules.min_* and
         # every .kicad_dru track_width / via_diameter / hole_size rule, resolved
         # per net and layer in KiCad's order, raised to the fab floor -- are
@@ -6835,7 +6906,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             _CY_SIZE = VIA_SIZE_KINDS + ('track_width',)
             _size_rules = _DR.from_project(pcb_data, pcb_file, fab_floor=fab,
                                            copper_layers=copper_layers)
-            if not (_size_rules.board_min or _size_rules.rules):
+            # #1844: a micro via is graded at KiCad's micro via minimums even
+            # on a board that declares none (its drill at KiCad's 0.1 mm)
+            if not (_size_rules.board_min or _size_rules.rules or any(
+                    getattr(v, 'via_type', None) == 'micro' for v in pcb_data.vias)):
                 _size_rules = None
         except Exception as _dre:                              # noqa: BLE001
             if not quiet:
@@ -6876,28 +6950,54 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             return max(eff_min_via_ring, v) if v is not None else eff_min_via_ring
 
         def _via_floors(via):
+            d, h = _via_size_floors(via)
+            if (_aspect and min_via_drill is None
+                    and getattr(via, 'via_type', 'through') != 'through'
+                    and not (_size_rules is not None
+                             and _size_rules.via_laser_drilled(via))):
+                if _size_rules is None:
+                    h = _drill_flat
+                else:
+                    c = _size_rules.resolve('hole_size', _size_rules.via_item(
+                        via, _courtyards), None, None)
+                    h = max(_drill_flat, (c.kicad_min if c.fab_bound else c.min) or 0.0)
+            return d, h
+
+        def _via_size_floors(via):
             if _size_rules is None:
                 return eff_min_via_dia, eff_min_via_drill
             _vi = _size_rules.via_item(via, _courtyards)
             # #1844: a micro via is graded at the board's micro via minimums;
-            # the fab floor's via numbers are for a mechanical drill
-            _micro = _vi.via_type == 'micro'
+            # the fab floor's via numbers are for a mechanical drill, so they
+            # bind every via but a laser-drilled one (two adjacent layers)
+            _laser = _size_rules.via_laser_drilled(via)
             d = (eff_min_via_dia if min_via_diameter is not None
                  else (_size_rules.resolve('via_diameter', _vi, None, None).min
-                       or (0.0 if _micro else eff_min_via_dia)))
+                       or (0.0 if _laser else eff_min_via_dia)))
             h = (eff_min_via_drill if min_via_drill is not None
                  else (_size_rules.resolve('hole_size', _vi, None, None).min
-                       or (0.0 if _micro else eff_min_via_drill)))
+                       or (0.0 if _laser else eff_min_via_drill)))
             return d, h
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
                   f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm"
-                  + ("; per-net board/rule minimums applied (#530)" if _size_rules else ""))
-            if _size_rules is not None and any(
-                    getattr(v, 'via_type', None) == 'micro' for v in pcb_data.vias):
+                  + ("; per-net board/rule minimums applied (#530)" if _size_rules else "")
+                  + (f"; through-via drill held to {_aspect:g}:1 on this {_thick:g} mm "
+                     f"board (#502)" if _aspect else ""))
+            _n_micro = sum(1 for v in pcb_data.vias
+                           if getattr(v, 'via_type', None) == 'micro')
+            if _size_rules is not None and _n_micro:
+                _n_mech = _n_micro - sum(1 for v in pcb_data.vias
+                                         if _size_rules.via_laser_drilled(v))
                 print("  micro vias: graded at the board's micro via minimums "
                       "(Board Setup drill, net class diameter, .kicad_dru rules), "
-                      "not the fab floor's mechanical via sizes")
+                      "not the fab floor's mechanical via sizes"
+                      + (f"; {_n_mech} typed micro but spanning more than two "
+                         f"adjacent layers keep the fab floor (a mechanical drill)"
+                         if _n_mech else ""))
+            from fab_tiers import aspect_inert_warning
+            if aspect_inert_warning(_thick):
+                print(f"WARNING: {aspect_inert_warning(_thick)}")
         # #1390: a .kicad_dru size rule whose condition is not modelled
         # (A.insideCourtyard(), ...) binds copper the minimums above
         # know nothing about, and used to vanish: the clearance half got
@@ -7740,18 +7840,43 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         nv = len(all_vias)
         # #1848: a `.kicad_dru` hole_to_hole rule sets the spacing of the drill
         # pairs it binds (last match wins, `A.Via_Type` and the resolver's
-        # other conditions), replacing the run's one value above or below it,
-        # pinned up only at the fab floor. No rule: the one value, as before.
+        # other conditions), replacing the run's one value above or below it.
+        # The fab floor pins it up only for two mechanically drilled holes; a
+        # pair with a laser-drilled micro via (two adjacent layers, #1844) is
+        # held to the rule, else Board Setup's min_hole_to_hole, alone. A rule
+        # with a severity still binds its pairs, and the severity pass then
+        # leaves an `ignore` one's ungraded. No rule: the one value, as before.
+        from design_rules import laser_drilled_span as _h2h_laser_span
+        from geometry_utils import via_copper_layers as _h2h_span
         _h2h_dr = None
         _h2h_pinned = set()            # rules the fab floor pinned up
         _h2h_bound = hole_to_hole_clearance
         _h2h_fab = 0.0
+        _h2h_board = None              # Board Setup's min_hole_to_hole
         try:
-            from design_rules import DesignRules as _H2HDR
+            import copy as _h2h_copy
+            from dataclasses import replace as _h2h_replace
+            from design_rules import (DesignRules as _H2HDR, Unsupported as _H2HUns,
+                                      parse_condition as _h2h_parse,
+                                      _coupled_terms as _h2h_coupled)
             from fab_tiers import physical_fab_floor as _h2h_floor
             _dr = _H2HDR.from_project(pcb_data, pcb_file, copper_layers=_board_copper)
-            _h2h_rules = [r for r in _dr.rules if 'hole_to_hole' in r.constraints
-                          and not str(r.unsupported or '').startswith('severity')]
+            _h2h_board = _dr.board_min.get('min_hole_to_hole')
+
+            def _h2h_severity_rule(r):
+                """A rule the resolver skips for its severity alone, read."""
+                try:
+                    cond = (_h2h_parse(r.condition_src)
+                            if r.condition_src is not None else None)
+                except _H2HUns as e:
+                    return _h2h_replace(r, unsupported=f"condition: {e}")
+                coupled, apart = _h2h_coupled(cond) if cond is not None else (False, False)
+                return _h2h_replace(r, unsupported=None, condition=cond,
+                                    coupled=coupled, keep_apart=apart)
+            _h2h_all = [(_h2h_severity_rule(r) if 'hole_to_hole' in r.constraints
+                         and str(r.unsupported or '').startswith('severity') else r)
+                        for r in _dr.rules]
+            _h2h_rules = [r for r in _h2h_all if 'hole_to_hole' in r.constraints]
             for _r in _h2h_rules:
                 if _r.unsupported:
                     _note_not_graded('hole_to_hole', _r.name, _r.unsupported)
@@ -7760,7 +7885,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               f"({_r.unsupported}) -- the drills it binds are graded "
                               f"at {hole_to_hole_clearance:.4g} mm; KiCad still enforces it")
             if any(not r.unsupported for r in _h2h_rules):
-                _h2h_dr = _dr
+                _h2h_dr = _h2h_copy.copy(_dr)
+                _h2h_dr.rules = _h2h_all
+                _h2h_dr._cache = {}
                 _h2h_fab = float(_h2h_floor(len(_board_copper) or 2).get('hole_to_hole') or 0.0)
                 _h2h_bound = max([hole_to_hole_clearance, _h2h_fab]
                                  + [float(r.constraints['hole_to_hole'].get('min') or 0.0)
@@ -7769,29 +7896,47 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if not quiet:
                 print(f"  (hole_to_hole rules unavailable: {_h2he})")
 
-        def _h2h_required(item_a, item_b):
-            """(spacing, rule name or None) of one drill pair."""
-            if _h2h_dr is None:
-                return hole_to_hole_clearance, None
-            c = _h2h_dr.resolve('hole_to_hole', item_a(), item_b(), None)
-            if c.min_rule and c.min is not None:
-                if float(c.min) < _h2h_fab - 1e-9:
-                    _h2h_pinned.add(c.min_rule)
-                return max(float(c.min), _h2h_fab), c.min_rule
+        def _h2h_required(item_a, item_b, laser=False):
+            """(spacing, rule name or None) of one drill pair; ``laser``: one
+            of its holes is a laser-drilled micro via."""
+            if _h2h_dr is not None:
+                c = _h2h_dr.resolve('hole_to_hole', item_a(), item_b(), None)
+                if c.min_rule and c.min is not None:
+                    if laser:
+                        return float(c.min), c.min_rule
+                    if float(c.min) < _h2h_fab - 1e-9:
+                        _h2h_pinned.add(c.min_rule)
+                    return max(float(c.min), _h2h_fab), c.min_rule
+            if laser and _h2h_board is not None:
+                return float(_h2h_board), None
             return hole_to_hole_clearance, None
 
-        def _h2h_mark(row, req, rule):
+        def _h2h_mark(row, req, rule, laser=False):
             if rule:
                 row.update(required_mm=req, rule=rule, required_source=(
                     f"fab floor, over rule '{rule}'" if rule in _h2h_pinned
                     else f"rule '{rule}'"))
+            if laser:
+                # the fab floor's drill spacing is for two mechanical holes
+                row.update(laser_drilled=True, required_mm=req)
             return row
-        # KiCad grades a laser drill against a mechanical one but never two
-        # laser drills against each other (#1848, measured on kicad-cli
-        # 10.0.8). The spacing is still a fab limit, so the pair is graded
-        # here at the value that binds it, and its row says KiCad has none.
-        vmicro = np.array([getattr(v, 'via_type', None) == 'micro' for v in all_vias],
-                          dtype=bool)
+        # Each via's copper span as a bit mask: KiCad grades no drill pair
+        # whose spans share no copper layer (two blind vias on opposite
+        # halves of the stack), and no pair of two laser drills at all
+        # (both measured on kicad-cli 10.0.6). Such laser pairs are counted
+        # and named in one line rather than graded.
+        _bit = {layer: 1 << n for n, layer in enumerate(_board_copper)}
+        _all_bits = sum(_bit.values()) or 1        # no layer list: every via shares
+        vspan = np.array([sum(_bit.get(layer, 0) for layer in _h2h_span(v, _board_copper))
+                          or _all_bits for v in all_vias], dtype=np.int64)
+        vlaser = np.array([_h2h_laser_span(getattr(v, 'via_type', None),
+                                           _h2h_span(v, _board_copper), _board_copper)
+                           for v in all_vias], dtype=bool)
+        _laser_pairs = 0
+        # the widest spacing any pair can be held to (a rule, or Board Setup's
+        # value for a laser pair): the vectorised pass keeps every pair within
+        # it, and each is re-read against its own value
+        _h2h_wide = max(_h2h_bound, float(_h2h_board or 0.0))
         if nv >= 2:
             vx = np.array([v.x for v in all_vias], dtype=np.float64)
             vy = np.array([v.y for v in all_vias], dtype=np.float64)
@@ -7805,21 +7950,26 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 required = vdrill[i] / 2 + vdrill[i + 1:] / 2 + hole_to_hole_clearance
                 actual = np.sqrt((vx[i] - vx[i + 1:]) ** 2 + (vy[i] - vy[i + 1:]) ** 2)
                 overlap = required - actual
-                if _h2h_dr is None:
+                if _h2h_wide <= hole_to_hole_clearance + 1e-12:
                     viol = overlap > tolerance
                 else:
                     # every pair a rule could hold wider; each is re-read below
-                    viol = overlap + (_h2h_bound - hole_to_hole_clearance) > 0
+                    viol = overlap + (_h2h_wide - hole_to_hole_clearance) > 0
+                viol &= (vspan[i] & vspan[i + 1:]) != 0
                 if vmatch is not None:
                     # Skip pairs where neither net matches the filter.
                     viol &= vmatch[i] | vmatch[i + 1:]
                 for k in np.nonzero(viol)[0].tolist():
                     via1 = all_vias[i]
                     via2 = all_vias[i + 1 + k]
+                    _laser = bool(vlaser[i] or vlaser[i + 1 + k])
                     _req, _rule = _h2h_required(lambda: _h2h_dr.via_item(via1),
-                                                lambda: _h2h_dr.via_item(via2))
+                                                lambda: _h2h_dr.via_item(via2), _laser)
                     _ov = float(overlap[k]) + (_req - hole_to_hole_clearance)
-                    if _h2h_dr is not None and _ov <= _grade_tol(_req, 0.05):
+                    if _ov <= _grade_tol(_req, 0.05):
+                        continue
+                    if vlaser[i] and vlaser[i + 1 + k]:
+                        _laser_pairs += 1
                         continue
                     net1_name = pcb_data.nets.get(via1.net_id, None)
                     net2_name = pcb_data.nets.get(via2.net_id, None)
@@ -7832,9 +7982,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'overlap_mm': _ov,
                         'loc1': (via1.x, via1.y),
                         'loc2': (via2.x, via2.y),
-                        **({'laser_pair': True}
-                           if vmicro[i] and vmicro[i + 1 + k] else {}),
-                    }, _req, _rule))
+                    }, _req, _rule, _laser))
+        if _laser_pairs and not quiet:
+            print(f"  NOT GRADED (hole_to_hole): {_laser_pairs} pair(s) of two laser-drilled "
+                  f"micro vias closer than the spacing that binds them -- KiCad's "
+                  f"hole_to_hole grades no such pair")
 
         # Check via drill to pad drill (through-hole pads)
         # NOTE: Hole-to-hole clearance applies regardless of net (manufacturing constraint)
@@ -7873,16 +8025,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             else:
                 pmatch = np.array([pn in matching_pad_nets for pn in th_pad_nets], dtype=bool)
             tolerance = _grade_tol(hole_to_hole_clearance, 0.05)
-            for via in all_vias:
+            for _vi, via in enumerate(all_vias):
+                _vlaser = bool(vlaser[_vi])
                 via_matches = matching_via_nets is None or via.net_id in matching_via_nets
                 required = prad + via.drill / 2 + hole_to_hole_clearance
                 t = np.clip(((via.x - p1x) * cdx + (via.y - p1y) * cdy) / safe_clen2, 0.0, 1.0)
                 actual = np.sqrt((via.x - (p1x + t * cdx)) ** 2 + (via.y - (p1y + t * cdy)) ** 2)
                 overlap = required - actual
-                if _h2h_dr is None:
+                if _h2h_wide <= hole_to_hole_clearance + 1e-12:
                     viol = overlap > tolerance
                 else:
-                    viol = overlap + (_h2h_bound - hole_to_hole_clearance) > 0
+                    viol = overlap + (_h2h_wide - hole_to_hole_clearance) > 0
                 # Skip (via, pad) where neither net matches the filter. When the via
                 # matches, every pad is checked; otherwise only filter-matching pads.
                 if not via_matches and pmatch is not None:
@@ -7891,9 +8044,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     pad = th_pads[k]
                     pad_net = th_pad_nets[k]
                     _req, _rule = _h2h_required(lambda: _h2h_dr.via_item(via),
-                                                lambda: _h2h_dr.pad_item(pad))
+                                                lambda: _h2h_dr.pad_item(pad), _vlaser)
                     _ov = float(overlap[k]) + (_req - hole_to_hole_clearance)
-                    if _h2h_dr is not None and _ov <= _grade_tol(_req, 0.05):
+                    if _ov <= _grade_tol(_req, 0.05):
                         continue
                     via_net_name = pcb_data.nets.get(via.net_id, None)
                     pad_net_name = pcb_data.nets.get(pad_net, None)
@@ -7908,7 +8061,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'pad_loc': (pad.global_x, pad.global_y),
                         'pad_ref': f"{pad.component_ref}.{pad.pad_number}",
                         'via_loc': (via.x, via.y),
-                    }, _req, _rule))
+                    }, _req, _rule, _vlaser))
 
     # Check copper-to-hole clearance: a TRACK too close to an NPTH (no-copper) drill
     # hole of a DIFFERENT net (issue #233). The drill removes the copper that crosses
@@ -8744,6 +8897,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'via_loc': (via.x, via.y),
                         **({'via_type': 'micro'}
                            if getattr(via, 'via_type', None) == 'micro' else {}),
+                        **({'laser_drilled': True} if _size_rules is not None
+                           and _size_rules.via_laser_drilled(via) else {}),
                     })
                 if drill_bad:
                     violations.append({
@@ -8755,6 +8910,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'via_loc': (via.x, via.y),
                         **({'via_type': 'micro'}
                            if getattr(via, 'via_type', None) == 'micro' else {}),
+                        **({'laser_drilled': True} if _size_rules is not None
+                           and _size_rules.via_laser_drilled(via) else {}),
+                        # #502: the drill against the board it is plated through
+                        **({'aspect_ratio': round(_thick / via.drill, 2),
+                            'max_aspect_ratio': _aspect, 'board_thickness_mm': _thick}
+                           if _aspect and via.drill > 0
+                           and getattr(via, 'via_type', 'through') == 'through' else {}),
                     })
 
     _via_in_paste_pass(pcb_data, matching_via_nets, _baseline_pd, violations,
@@ -9190,9 +9352,6 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Via1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})")
                         print(f"    Via2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})")
-                        if v.get('laser_pair'):
-                            print("    Two micro vias: a fab spacing graded here; "
-                                  "KiCad's hole_to_hole does not grade this pair")
                     elif vtype in ('pad-drill-via-drill', 'pad-drill-via-drill-same-net'):
                         same_net_msg = " [SAME NET]" if vtype.endswith('same-net') else ""
                         print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Via:{v['net2']} (drill hole clearance){same_net_msg}")
@@ -9249,6 +9408,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                                   f"past the area edge, {v['inside_mm']:.3f}mm of "
                                   f"centreline inside, at ({v['loc'][0]:.2f},{v['loc'][1]:.2f})")
                             print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                        elif v.get('contact_finger'):
+                            print(f"  Via:{v['net1']} in {v['area']} "
+                                  f"(no via in an edge connector's mating copper)")
                         else:
                             print(f"  Via:{v['net1']} in keep-out rule area {_an} "
                                   f"(vias not allowed)")
@@ -9345,6 +9507,10 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  Via:{v['net1']} drill hole too small for fab")
                         print(f"    Drill: {v['drill']:.4f}mm < min {v['min_drill']:.4f}mm "
                               f"(short {v['shortfall_mm']:.4f}mm)")
+                        if v.get('aspect_ratio'):
+                            print(f"    Aspect ratio: {v['aspect_ratio']:g}:1 through the "
+                                  f"{v['board_thickness_mm']:g} mm board, over "
+                                  f"{v['max_aspect_ratio']:g}:1")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     elif vtype == 'via-annular':
                         print(f"  Via:{v['net1']} annular ring too small "
@@ -9874,7 +10040,10 @@ if __name__ == "__main__":
             'keepout': dict(
                 violations=sum(1 for v in _real if v.get('type') == 'keepout'),
                 inherited=sum(1 for v in violations
-                              if v.get('accepted') == 'inherited-keepout')),
+                              if v.get('accepted') == 'inherited-keepout'),
+                # #1116: of the violations, vias in a contact finger
+                contact_finger=sum(1 for v in _real if v.get('type') == 'keepout'
+                                   and v.get('contact_finger'))),
             # `short`: copper of two nets in contact (SHORT_TYPES), never a
             # drill, hole or edge item whatever its overlap (#1558). A
             # crossing has no overlap to grade: it is contact (#1563).

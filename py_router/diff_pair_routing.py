@@ -23,6 +23,7 @@ from obstacle_map import check_line_clearance
 from geometry_utils import simplify_path, segments_intersect_tuple
 from net_queries import resolve_gnd_net_id, resolve_return_net_id
 from net_keepouts import stamping as _nk_stamping
+from via_span import via_layer_pair as _via_layer_pair, via_kind as _via_kind
 # Note: Layer switching is now done upfront in route.py, not during routing
 
 # Import Rust router
@@ -1602,9 +1603,10 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
                     x=gx, y=gy,
                     size=config.via_size,
                     drill=config.via_drill,
-                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    layers=_via_layer_pair(config),   # through, or the step's span (#1842)
                     net_id=gnd_net_id,
-                    free=True
+                    free=True,
+                    via_type=_via_kind(config)
                 ))
 
     return gnd_vias
@@ -1938,8 +1940,9 @@ def _float_path_to_geometry(float_path, net_id, original_start, original_end, si
                 x=x1, y=y1,
                 size=config.via_size,
                 drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=net_id
+                layers=_via_layer_pair(config),   # through, or the step's span (#1842)
+                net_id=net_id,
+                via_type=_via_kind(config)
             ))
         elif abs(x1 - x2) > 0.001 or abs(y1 - y2) > 0.001:
             # Always use actual layer for segment
@@ -3539,12 +3542,35 @@ def _pad_obstacle_segments(pad, layer_names):
     # a square pad that DOUBLES its footprint, and on ecp5_mini's 1.27mm header
     # a partner 1.7x1.7 pin pad sealed the only escape corridor, failing every
     # hybrid leg, #289.)
+    # The cap must reach the pad's farthest corner copper. A corner of radius r
+    # (roundrect: rratio * short; rect: 0; circle/oval: short/2) has its centre
+    # (short/2 - r) from the spine end along both axes, so the enclosing cap
+    # radius is sqrt(2)*(short/2 - r) + r. Sharp rect keeps the short*sqrt(2)
+    # of #289; a 0.25-rratio roundrect gets 1.21*short, not 1.41*short (the
+    # 1.41 bulge of the partner pad of a 0.5 mm pitch QFN closed the only
+    # exit of the other member's single-ended leg on the neighbouring pin).
     half = max(long_ / 2.0 - short / 2.0, 0.0)
-    w = short if pad.shape in ('circle', 'oval') else short * math.sqrt(2.0)
-    if sx >= sy:
-        a = (cx - half, cy, cx + half, cy, w)
+    if pad.shape in ('circle', 'oval'):
+        r = short / 2.0
+    elif pad.shape == 'roundrect':
+        r = min(max(getattr(pad, 'roundrect_rratio', 0.0) or 0.0, 0.0), 0.5) * short
     else:
-        a = (cx, cy - half, cx, cy + half, w)
+        r = 0.0
+    w = 2.0 * max(short / 2.0, math.sqrt(2.0) * (short / 2.0 - r) + r)
+    if sx >= sy:
+        a = [cx - half, cy, cx + half, cy, w]
+    else:
+        a = [cx, cy - half, cx, cy + half, w]
+    # A pad with a drawn outline (a chamfered rect, #1450, keeps shape
+    # 'roundrect' and its rratio on the uncut corners; a custom pad) is not
+    # the rounded box above: a shallow chamfer reaches past the roundrect
+    # corner. Distance to the spine is convex, so the outline's farthest
+    # copper is a vertex; its arcs are inscribed at 1 um sagitta, added back.
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        reach = max(_pt_seg_dist(px, py, a[0], a[1], a[2], a[3])
+                    for poly in polys for px, py in poly)
+        a[4] = 2.0 * max(short / 2.0, reach + 0.001)
     cu = [L for L in (pad.layers or []) if L.endswith('.Cu')]
     if (getattr(pad, 'drill', 0) or 0) > 0 or not cu:
         cu = list(layer_names)  # THT / unknown copper -> block every routing layer
