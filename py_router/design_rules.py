@@ -3805,6 +3805,9 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
             rules.net_keepouts = list(rules.net_keepouts) + derive_contact_fingers(pcb_data)
         except Exception as e:                                 # noqa: BLE001
             rules.notes.append(f"contact-finger via keep-outs not derived ({e})")
+        # #1843: and the clearance rules scoped by a rule area
+        from area_clearance import mark_honoured
+        mark_honoured(rules, pcb_data)
     key = (os.path.abspath(rules.source) if rules.source else '',
            tuple((r.name, r.unsupported, r.honoured, r.router_unhonoured)
                  for r in rules.rules))
