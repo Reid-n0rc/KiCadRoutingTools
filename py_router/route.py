@@ -34,7 +34,7 @@ exit_on_error_if_main(__name__)
 import time
 _RUN_T0 = time.monotonic()  # "Wall time" counts from here, ahead of the heavy imports
 import json
-from typing import List, Optional, Tuple, Dict, Set
+from typing import List, Optional, Tuple, Dict, Set, Sequence
 
 from kicad_parser import parse_kicad_pcb, PCBData, Pad, pour_zones
 from kicad_writer import (
@@ -2473,6 +2473,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the persisted .kicad_pro record; > 0 activates (and is
                 # persisted for later chain steps); 0 / -1 explicitly OFF.
                 same_net_pad_clearance: Optional[float] = None,
+                # #1842: (top layer, bottom layer) of the vias this step lays,
+                # and `via_span_type` to override the type read off the span
+                # (via_span.resolve_via_span). None -> through vias.
+                via_span: Optional[Sequence[str]] = None,
+                via_span_type: Optional[str] = None,
+                # 'route': lay an escape via at each surface pad of the
+                # selected nets first, then route; 'only': lay the escapes
+                # and route nothing (via_span.escape_pads). None -> off.
+                via_span_escape: Optional[str] = None,
                 # #1260: the pour islands this run may not cut
                 # (GridRouteConfig.pour_barriers). None (both fronts) ->
                 # computed from this call's scope; a list is the OUTER run's,
@@ -2953,6 +2962,55 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
         layers = DEFAULT_4_LAYER_STACK
+    # #1842: a via span is the step's sub-stack -- it routes on those layers
+    # only, and every via it lays joins exactly that run
+    _span1842 = _span_type1842 = None
+    if via_span:
+        from via_span import resolve_via_span
+        _span1842, _span_type1842 = resolve_via_span(
+            list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
+            via_span[0], via_span[-1], via_span_type)
+        if _span_type1842 is None:
+            _span1842 = None                      # the whole stack: through vias
+        else:
+            _in_span = [l for l in layers if l in _span1842]
+            if layer_costs and len(layer_costs) == len(layers):
+                layer_costs = [c for l, c in zip(layers, layer_costs) if l in _span1842]
+                if not _in_span:
+                    layer_costs = None
+            layers = _in_span or list(_span1842)
+            print(f"Via span (#1842): {_span_type1842} vias {_span1842[0]}-{_span1842[-1]}; "
+                  f"routing on {', '.join(layers)} only, and only copper on "
+                  f"{', '.join(_span1842)} (and drilled pads) blocks a via site")
+            # copper the step could not lay again stays where it is
+            from via_span import hold_outside_copper as _hold1842
+            _held1842 = _hold1842(pcb_data, _span1842)
+            if _held1842:
+                print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
+                      f"span are held in place for this step")
+            if _span_type1842 == 'micro' and via_from_class:
+                # no via size was asked for: a micro via span draws the
+                # Default class's MICRO via on every net (a class's
+                # via_diameter is its through via's), on both fronts
+                from via_span import default_micro_via
+                _mdia, _mdrill = default_micro_via(
+                    input_file or getattr(pcb_data, 'source_path', '') or '')
+                if _mdia:
+                    via_size = _mdia
+                if _mdrill:
+                    via_drill = _mdrill
+                if _mdia or _mdrill:
+                    print(f"  micro via span: drawing the board Default net-class micro "
+                          f"via {via_size}/{via_drill} mm on every net")
+                via_from_class = False
+            if disable_bga_zones is None:
+                # "no new via in a BGA's pad field" is a rule for through
+                # vias, which the fan-out step lays there. A via of a span
+                # between the balls, or under them on layers the part has no
+                # copper on, is how a dense part escapes.
+                disable_bga_zones = []
+                print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
+                      f"fields (--no-bga-zones)")
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # One cost per requested layer, or the full-stack append below puts its
@@ -3341,6 +3399,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         config_kwargs['same_net_pad_clearance'] = _snpc581
         print(f"Same-net pad via clearance {_snpc581:g}mm (from {_snpc_src}, "
               f"#581): vias stay off same-net pads")
+    if _span1842:
+        config_kwargs['via_span'] = tuple(_span1842)
+        config_kwargs['via_span_type'] = _span_type1842
     config = GridRouteConfig(**config_kwargs)
     config.quick = int(quick or 0)
     # The in-loop stub-debris trim must treat input copper as read-only in
@@ -4003,6 +4064,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                  single_ended_nets, all_swap_vias,
                                  all_swap_segments, verbose=verbose)
 
+    # #1842: a via-span step's escapes -- a via of the span at each surface
+    # pad -- laid BEFORE the base map build, like the plan's, so every later
+    # map sees the copper
+    _escape1842 = None
+    if config.via_span and via_span_escape in ('route', 'only'):
+        from via_span import escape_pads as _escape_pads1842
+        _escape1842 = _escape_pads1842(pcb_data, config, list(single_ended_nets),
+                                       all_swap_vias, all_swap_segments, verbose=verbose)
+        if via_span_escape == 'only':
+            print("  --via-span-escape only: the escapes are laid and nothing is routed")
+            del net_ids[:]
+            del single_ended_nets[:]
+
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
 
@@ -4321,8 +4395,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # track map above used to switch off in the sub-run: a lap then routed a
     # net through the gap a scoped rule had closed to this pass.
     _reconcile_kwargs['scoped_clearance_rules'] = _scoped_rules_of(config)
+    # #1842: under a via span the builders read the board without the copper
+    # outside the span
+    from via_span import obstacle_board as _obstacle_board1842
+    _obs_pcb = _obstacle_board1842(pcb_data, config)
     base_obstacles = build_base_obstacle_map(
-        pcb_data, config, base_map_exclusions,
+        _obs_pcb, config, base_map_exclusions,
         net_clearances=net_clearances,
         # #422: base holds only permanent copper/geometry (target + rippable
         # nets live in the per-net caches on a CLONE); stamp it straight into
@@ -4374,7 +4452,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print("Pre-computing net obstacle cache...")
     cache_start = time.time()
     net_obstacles_cache = precompute_all_net_obstacles(
-        pcb_data, list(all_unrouted_net_ids), config,
+        _obs_pcb, list(all_unrouted_net_ids), config,
         extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
     # Rippable pre-existing nets need cache entries too: the working obstacle
@@ -4383,7 +4461,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         from obstacle_cache import precompute_net_obstacles
         for nid in existing_rippable + relocatable_plane_ids:
             net_obstacles_cache[nid] = precompute_net_obstacles(
-                pcb_data, nid, config, extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN)
+                _obs_pcb, nid, config, extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN)
 
     cache_time = time.time() - cache_start
     print(f"Net obstacle cache built in {cache_time:.2f}s ({len(net_obstacles_cache)} nets)")
@@ -5600,6 +5678,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                       f"{len(_cd['disconnected_pads'])} pad(s) now unconnected{RESET}")
                 for _dv in _cd['dropped_vias']:
                     print(f"      dropped via @ ({_dv['x']:.3f}, {_dv['y']:.3f})")
+
+    # #1842: every via a via-span step laid joins the span, whichever site
+    # built it (the map each was placed on was the span's)
+    if config.via_span:
+        from via_span import apply_span as _apply_span1842
+        _retyped1842 = sum(_apply_span1842(_r.get('new_vias'), config) for _r in results)
+        # ... and the stub layer-swap vias, which are in no result
+        _retyped1842 += _apply_span1842(all_swap_vias, config)
+        if _retyped1842:
+            print(f"  Via span: {_retyped1842} via(s) laid by a through-via site "
+                  f"written as {config.via_span_type} {config.via_span[0]}-"
+                  f"{config.via_span[-1]}")
 
     # ---- VIA DEDUP (run-7 E3) ----------------------------------------------
     # Failed/partial attempts can leave a result emitting a via at the exact
@@ -7527,8 +7617,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
         except Exception as _e9c:
             print(f"  (pre-finalize checkpoint failed: {_e9c})")
+    # #1842: the plane finalize lays THROUGH taps, at the step's via size. A
+    # step on a partial span draws a micro, blind or buried via of that size,
+    # so it does not run the finalize; the plane step does.
+    _span_no_finalize = bool(config.via_span) and config.via_span_type != 'through'
+    if (_span_no_finalize and final_reconcile and not quick
+            and (getattr(pcb_data, 'zones', None) or [])):
+        print(f"\n  Plane finalize not run: this step lays {config.via_span_type} vias "
+              f"on {config.via_span[0]}-{config.via_span[-1]}, and a plane tap is a "
+              f"through via. Run the plane step for the plane nets.")
     if (final_reconcile and (not skip_routing or _fin_only)
             and not _ckpt_stop and not quick
+            and not _span_no_finalize
             and (output_file or return_results)
             and not _plane_finalize_active()
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
@@ -10243,6 +10343,24 @@ For differential pair routing, use route_diff.py:
                         help="Direction search order for each net route")
     # #381 D9: accept the singular --no-bga-zone spelling too (the plane/fanout
     # scripts spell it singular); same nargs='*' dest -- additive, plural kept.
+    parser.add_argument("--via-span", nargs=2, default=None, metavar=("TOP", "BOTTOM"),
+                        help="Lay vias that join only this run of neighbouring copper "
+                             "layers (e.g. F.Cu In1.Cu: micro vias; In1.Cu In6.Cu on "
+                             "an 8-layer board: buried vias), and route on those layers "
+                             "only. Only copper on those layers, and drilled pads, "
+                             "blocks a via site. Default: through vias (#1842)")
+    parser.add_argument("--via-span-escape", choices=("route", "only"), default=None,
+                        help="With --via-span: first lay an escape -- a via of the span "
+                             "and a short track -- at each surface pad of the selected "
+                             "nets, then route ('route'), or lay the escapes and route "
+                             "nothing ('only'), leaving the nets for the next "
+                             "sub-stack's step")
+    parser.add_argument("--via-span-type", choices=("micro", "blind", "buried"),
+                        default=None,
+                        help="The via type written for --via-span (default: micro for "
+                             "two neighbouring layers one of which is an outer layer, "
+                             "blind for a longer span reaching one outer layer, buried "
+                             "otherwise)")
     parser.add_argument("--no-bga-zones", "--no-bga-zone", nargs="*", default=None,
                         help="Disable BGA exclusion zones. No args = disable all. With component refs (e.g., U1 U3) = disable only those.")
     parser.add_argument("--rip-existing-nets", nargs="+", default=None,
@@ -10666,6 +10784,28 @@ For differential pair routing, use route_diff.py:
     # #530 decision 4: likewise for the via -- omitted, each net's via is its
     # own class / rule draw size (per-net via rungs in the obstacle map).
     _vs_explicit = args.via_size is not None or args.via_drill is not None
+    # #1842: --via-span is checked against the board's own stack, and a micro
+    # via span draws the Default class's MICRO via where no size is given, on
+    # every net (a class's via_diameter is its through via's). The fab
+    # floor's via sizes are a mechanical drill's and do not pin it.
+    _micro_span = False
+    if getattr(args, 'via_span', None):
+        from via_span import file_copper_layers, resolve_via_span, default_micro_via
+        try:
+            _span_layers, _span_type = resolve_via_span(
+                file_copper_layers(args.input_file), args.via_span[0], args.via_span[1],
+                getattr(args, 'via_span_type', None))
+        except ValueError as _e:
+            parser.error(f"--via-span: {_e}")
+        _micro_span = _span_type == 'micro'
+        if _micro_span:
+            _mdia, _mdrill = default_micro_via(args.input_file)
+            for _pname, _val in (('via_size', _mdia), ('via_drill', _mdrill)):
+                if getattr(args, _pname, None) is None and _val:
+                    setattr(args, _pname, _val)
+                    print(f"--{_pname.replace('_', '-')} not given; using the board "
+                          f"Default net-class micro via {_val}mm (--via-span).")
+            _vs_explicit = True
     # track_width / via_size / via_drill: when omitted, default to the board's OWN
     # Default net-class value (else the routing_defaults constant), so a bare route
     # uses the board's own geometry -- parity with the GUI's per-control override.
@@ -10735,8 +10875,8 @@ For differential pair routing, use route_diff.py:
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
         clearance_ceiling=getattr(args, 'clearance_ceiling', None),
-        via_size=getattr(args, 'via_size', None),
-        via_drill=getattr(args, 'via_drill', None),
+        via_size=None if _micro_span else getattr(args, 'via_size', None),
+        via_drill=None if _micro_span else getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
         board_edge_clearance=getattr(args, 'board_edge_clearance', None))
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps.
@@ -11178,6 +11318,8 @@ For differential pair routing, use route_diff.py:
                 hole_to_hole_clearance=args.hole_to_hole_clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 same_net_pad_clearance=args.same_net_pad_clearance,
+                via_span=args.via_span, via_span_type=args.via_span_type,
+                via_span_escape=args.via_span_escape,
                 vertical_attraction_radius=args.vertical_attraction_radius,
                 vertical_attraction_cost=args.vertical_attraction_cost,
                 ripped_route_avoidance_radius=args.ripped_route_avoidance_radius,
@@ -11280,7 +11422,10 @@ For differential pair routing, use route_diff.py:
                 clearance=eff_clearance, hole_clearance=_hole_clr,
                 hole_to_hole=args.hole_to_hole_clearance,
                 edge_clearance=args.board_edge_clearance, track_width=args.track_width,
-                via_diameter=args.via_size, via_drill=args.via_drill,
+                # #1842: a micro via span's size is a micro via's; it is no
+                # statement about the board's via or drilled-hole minimums
+                via_diameter=None if _micro_span else args.via_size,
+                via_drill=None if _micro_span else args.via_drill,
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")

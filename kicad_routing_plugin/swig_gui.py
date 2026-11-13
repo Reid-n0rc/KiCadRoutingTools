@@ -1549,6 +1549,23 @@ class RoutingDialog(wx.Dialog):
         bga_sizer.Add(self.no_bga_zones_ctrl, 1, wx.EXPAND)
         options_inner.Add(bga_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Via span (#1842): empty == CLI route.py's --via-span default (None:
+        # through vias). Two layer names == the CLI's two values.
+        span_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        span_sizer.Add(wx.StaticText(options_scroll, label="Via Span:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.via_span = wx.TextCtrl(options_scroll, value="")
+        self.via_span.SetToolTip("Lay vias that join only this run of copper layers and route on those layers only: the top and bottom layer, e.g. 'F.Cu In1.Cu' (micro vias) or 'In1.Cu In6.Cu' (buried vias). Leave empty (default) for through vias.")
+        span_sizer.Add(self.via_span, 1, wx.EXPAND)
+        self.via_span_type = wx.Choice(options_scroll, choices=['auto', 'micro', 'blind', 'buried'])
+        self.via_span_type.SetSelection(0)
+        self.via_span_type.SetToolTip("The via type written for the span: auto reads it off the span (micro for two neighbouring layers one of which is an outer layer, blind for a longer span reaching one outer layer, buried otherwise).")
+        span_sizer.Add(self.via_span_type, 0, wx.LEFT, 5)
+        self.via_span_escape = wx.Choice(options_scroll, choices=['off', 'route', 'only'])
+        self.via_span_escape.SetSelection(0)
+        self.via_span_escape.SetToolTip("Escapes for a via span: 'route' first lays a via of the span and a short track at each surface pad of the selected nets, then routes; 'only' lays the escapes and routes nothing, leaving the nets for the next sub-stack's step. 'off' (default) lays none.")
+        span_sizer.Add(self.via_span_escape, 0, wx.LEFT, 5)
+        options_inner.Add(span_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Rip pre-existing nets (issue #103): make tracks committed by a
         # previous run eligible for rip-up during retry. Mirrors the CLI
         # --rip-existing-nets flag (fnmatch patterns; ALL = everything).
@@ -2066,6 +2083,12 @@ class RoutingDialog(wx.Dialog):
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
+                # #1842: the route tab's Via Span, as bga_fanout.py /
+                # qfn_fanout.py --via-span
+                'via_span': (self.via_span.GetValue().replace(',', ' ').split() or None),
+                'via_span_type': (self.via_span_type.GetStringSelection()
+                                  if self.via_span_type.GetStringSelection()
+                                  in ('micro', 'blind', 'buried') else None),
             }
 
         return FanoutTab(
@@ -2969,6 +2992,9 @@ class RoutingDialog(wx.Dialog):
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
+        self.via_span.SetValue("")  # empty == CLI default (None: through vias)
+        self.via_span_type.SetSelection(0)
+        self.via_span_escape.SetSelection(0)
         self.rip_existing_nets_ctrl.SetValue("")
         self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
@@ -3499,6 +3525,14 @@ class RoutingDialog(wx.Dialog):
         else:
             config['no_bga_zones'] = None  # None means use BGA zones
 
+        # #1842: the via span, as route.py's --via-span / --via-span-type
+        _span_names = self.via_span.GetValue().replace(',', ' ').split()
+        config['via_span'] = _span_names or None
+        _span_type = self.via_span_type.GetStringSelection()
+        config['via_span_type'] = _span_type if _span_type in ('micro', 'blind', 'buried') else None
+        _span_escape = self.via_span_escape.GetStringSelection()
+        config['via_span_escape'] = _span_escape if _span_escape in ('route', 'only') else None
+
         # Parse rip-pre-existing-nets (issue #103): empty -> None (keep
         # pre-existing tracks fixed), ALL -> ["*"], else fnmatch patterns.
         rip_existing_text = self.rip_existing_nets_ctrl.GetValue().strip()
@@ -4004,6 +4038,9 @@ class RoutingDialog(wx.Dialog):
                     power_nets=config.get('power_nets', []),
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
+                    via_span=config.get('via_span'),
+                    via_span_type=config.get('via_span_type'),
+                    via_span_escape=config.get('via_span_escape'),
                     rip_existing_nets=config.get('rip_existing_nets'),
                     force_reroute=config.get('force_reroute', False),
                     # RAW patterns (pre-expansion), like the CLI main: the #521

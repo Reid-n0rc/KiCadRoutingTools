@@ -28,6 +28,7 @@ import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from geometry_utils import via_span_layer_indices
+from via_span import reads_span_board as _reads_span_board
 from area_clearance import composed as _area_composed
 
 try:
@@ -2853,6 +2854,7 @@ def via_floor_npth_holes(pcb_data: PCBData, routed_net_ids) -> list:
     return holes
 
 
+@_reads_span_board
 @_area_composed
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig,
@@ -2931,6 +2933,7 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         s, pcb_data, net_id, c, extra_clearance, _shapes=_shapes), populated_only=True)
 
 
+@_reads_span_board
 @_area_composed
 def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                           p_net_id: int, n_net_id: int,
@@ -2993,6 +2996,7 @@ def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: P
         )
 
 
+@_reads_span_board
 @_area_composed
 def add_diff_pair_own_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                          p_net_id: int, n_net_id: int,
@@ -3081,6 +3085,7 @@ def _add_segment_obstacle_with_exclusion(obstacles: GridObstacleMap, seg, coord:
             obstacles.add_blocked_via(c[0], c[1])
 
 
+@_reads_span_board
 @_area_composed
 def add_net_pads_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
@@ -3129,6 +3134,7 @@ def _via_h2h_cells(via, config: GridRouteConfig, coord: GridCoord):
     return np.column_stack([(gx + dxg)[dm], (gy + dyg)[dm]]).astype(np.int32)
 
 
+@_reads_span_board
 @_area_composed
 def add_net_vias_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                net_id: int, config: GridRouteConfig,
