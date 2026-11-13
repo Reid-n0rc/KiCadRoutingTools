@@ -3851,6 +3851,9 @@ def install_design_rules(config, input_file, pcb_data=None, *, fab_floor=None,
         except Exception as e:                                 # noqa: BLE001
             rules.notes.append(f"per-net edge bands not derived ({e})")
     if net_keepouts and pcb_data is not None:
+        # #1843: and the clearance rules scoped by a rule area
+        from area_clearance import mark_honoured
+        mark_honoured(rules, pcb_data)
         # #1116: no via in an edge connector's contact finger
         try:
             from net_keepouts import derive_contact_fingers
