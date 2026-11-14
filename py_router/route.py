@@ -2630,6 +2630,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the persisted .kicad_pro record; > 0 activates (and is
                 # persisted for later chain steps); 0 / -1 explicitly OFF.
                 same_net_pad_clearance: Optional[float] = None,
+                # #1896: at most this many pads on one plane tap via of the
+                # finalize (repair_planes); None: no limit
+                tap_via_share: Optional[int] = None,
                 # #1842: (top layer, bottom layer) of the vias this step lays,
                 # and `via_span_type` to override the type read off the span
                 # (via_span.resolve_via_span). None -> through vias.
@@ -7826,6 +7829,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
         except Exception as _e9c:
             print(f"  (pre-finalize checkpoint failed: {_e9c})")
+    # #1896: how the finalize's pad taps share vias, for the merged summary.
+    # Cleared here so a step whose finalize does not run reports none.
+    try:
+        import repair_planes as _rp1896
+        _rp1896.LAST_TAP_VIAS = None
+    except Exception:                                           # noqa: BLE001
+        _rp1896 = None
     if (final_reconcile and (not skip_routing or _fin_only)
             and not _ckpt_stop and not quick
             and (output_file or return_results)
@@ -8036,6 +8046,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # custody-restores casualties; KICAD_FINALIZE_RIP=0
                         # reverts for A/B.
                         rip_blocker_nets=_finalize_rip9,
+                        # #1896: the opt-in limit on pads per tap via
+                        tap_via_share=tap_via_share,
                         # #1621: never a net this step's --nets negates
                         hands_off_nets=sorted(_hands_off9(pcb_data)),
                         power_nets=power_nets,
@@ -8128,6 +8140,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if config.same_net_pad_clearance > 0 else None),
                         # Same rip-authority restoration as the GUI leg above.
                         rip_blocker_nets=_finalize_rip9,
+                        # #1896: the opt-in limit on pads per tap via
+                        tap_via_share=tap_via_share,
                         # #1621: the board below may be a fresh parse, which
                         # carries no stash -- hand the set over explicitly
                         hands_off_nets=sorted(_hands_off9(pcb_data)),
@@ -10056,6 +10070,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # predates the finalize, so it cannot carry this.
             if _merged is not None and _via_in_pad962 is not None:
                 _merged['via_in_pad'] = _via_in_pad962
+            # #1896: the plane finalize's tap vias and how they are shared
+            if (_merged is not None and _rp1896 is not None
+                    and (_rp1896.LAST_TAP_VIAS or {}).get('vias')):
+                _merged['tap_vias'] = _rp1896.LAST_TAP_VIAS
             # #1798: likewise the skew rows, read on the shipped board.
             if _merged is not None and _late_skew1798 is not None:
                 if _late_skew1798:
@@ -10955,6 +10973,8 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--board-edge-clearance", type=float, default=None,
                         help="Clearance from board edge in mm. Default: the board's own "
                              f"min_copper_edge_clearance constraint, else {defaults.BOARD_EDGE_CLEARANCE}.")
+    parser.add_argument("--tap-via-share", type=int, default=None, metavar="N",
+                        help="The plane finalize's taps: At most N pads on one plane tap via (#1896): a pad whose tap would reuse a neighbour's via that already serves N pads gets a via of its own where a legal site exists, else keeps the shared tap and is named. 1 = a via per pad. Default: no limit.")
     parser.add_argument("--same-net-pad-clearance", type=float, default=None,
                         help="Edge-to-edge clearance (mm) between EVERY placed via and "
                              "same-net pads (#581). > 0 keeps vias off same-net SMD pads "
@@ -11601,6 +11621,7 @@ For differential pair routing, use route_diff.py:
                 hole_to_hole_clearance=args.hole_to_hole_clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 same_net_pad_clearance=args.same_net_pad_clearance,
+                tap_via_share=args.tap_via_share,
                 via_span=args.via_span, via_span_type=args.via_span_type,
                 via_span_escape=args.via_span_escape,
                 vertical_attraction_radius=args.vertical_attraction_radius,

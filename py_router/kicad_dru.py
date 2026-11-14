@@ -365,6 +365,13 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
                 # #1843: read by position (area_clearance, design_rules.AreaIndex)
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
                              f"a rule area -- handled by position (#1843)")
+            elif _condition_is_coupled(condition):
+                # #1293: read, but not here -- it binds a pair's P against
+                # its own N, which the pair step and check_drc resolve
+                notes.append(f"rule '{name}': clearance {clearance_mm}mm between a "
+                             f"coupled pair's P and N -- handled by the coupled-pair "
+                             f"channel (#1293): route_diff.py builds the pair at it "
+                             f"and check_drc grades it")
             else:
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm has a "
                              f"non-layer scope (netclass/area/... condition) -- "
@@ -720,6 +727,34 @@ def recorded_intra_pair_rules(board_path: str) -> List[LengthRule]:
         out.append(LengthRule(RECORDED_INTRA_RULE, None, None, tol,
                               (('netname', p), ('netname', n)), '', 'error',
                               'skew', True))
+    return out
+
+
+def recorded_intra_pair_lanes(board_path: str) -> Dict[str, List[str]]:
+    """{net name: [pad, pad]} for both members of every recorded intra-pair
+    tolerance that carries a lane (#1869): the two pads the pair step matched
+    the member between, which is the path the recorded tolerance is graded
+    on. {} when no record has one."""
+    if not board_path:
+        return {}
+    try:
+        from protected_nets import (AC_CHAIN_PREFIX, pro_path_for_board,
+                                    read_intra_pair_tolerances)
+        rec = read_intra_pair_tolerances(pro_path_for_board(board_path))
+    except Exception:
+        return {}
+    out: Dict[str, List[str]] = {}
+    for p, r in rec.items():
+        if p.startswith(AC_CHAIN_PREFIX) or not isinstance(r, dict):
+            continue
+        lane = r.get('lane')
+        n = str(r.get('n') or '')
+        if not isinstance(lane, dict) or not n:
+            continue
+        lp, ln = lane.get('p'), lane.get('n')
+        if (isinstance(lp, list) and isinstance(ln, list)
+                and len(lp) == 2 and len(ln) == 2):
+            out[p], out[n] = [str(x) for x in lp], [str(x) for x in ln]
     return out
 
 
@@ -1180,6 +1215,16 @@ def strip_keep_apart(node):
             out = ('and', out, k)
         return out
     return node
+
+
+def _condition_is_coupled(src) -> bool:
+    """Does a condition AND in `AB.isCoupledDiffPair()` (the #1293 shape, a
+    rule binding a diff pair's P against its own N)?"""
+    try:
+        from design_rules import parse_condition, _coupled_terms
+        return _coupled_terms(parse_condition(str(src))) == (True, False)
+    except Exception:                                            # noqa: BLE001
+        return False
 
 
 def _condition_is_scoped(src: str) -> bool:

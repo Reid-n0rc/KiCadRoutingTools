@@ -55,6 +55,7 @@ def get_dialog_settings(dialog):
         'grid_step': dialog.grid_step.GetValue(),
         'via_cost': dialog.via_cost.GetValue(),
         'max_ripup': dialog.max_ripup.GetValue(),
+        'tap_via_share': dialog.tap_via_share.GetValue(),
         'ripup_abandon_metric': dialog.ripup_abandon_metric.GetString(
             dialog.ripup_abandon_metric.GetSelection()),
         'ripup_blocker_select': dialog.ripup_blocker_select.GetString(
@@ -218,6 +219,7 @@ def get_dialog_settings(dialog):
         'polarity_swap_nets_text': dialog.differential_tab.polarity_swap_nets_text.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
+        'diff_pair_intra_lane': dialog.differential_tab.diff_pair_intra_lane.GetValue(),
         'ac_couple_check': dialog.differential_tab.ac_couple_check.GetValue(),
         'diff_hide_short': dialog.differential_tab.hide_short_check.GetValue(),
 
@@ -374,6 +376,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.via_cost.SetValue(settings['via_cost'])
     if 'max_ripup' in settings:
         dialog.max_ripup.SetValue(settings['max_ripup'])
+    if 'tap_via_share' in settings:
+        dialog.tap_via_share.SetValue(int(settings['tap_via_share'] or 0))
     if 'ripup_abandon_metric' in settings:
         dialog.ripup_abandon_metric.SetStringSelection(settings['ripup_abandon_metric'])
     if 'ripup_blocker_select' in settings:
@@ -720,6 +724,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.gnd_via_check.SetValue(settings['gnd_via_check'])
     if 'intra_match_check' in settings:
         dialog.differential_tab.intra_match_check.SetValue(settings['intra_match_check'])
+    if 'diff_pair_intra_lane' in settings:
+        dialog.differential_tab.diff_pair_intra_lane.SetValue(
+            str(settings['diff_pair_intra_lane'] or ''))
     if 'ac_couple_check' in settings:
         dialog.differential_tab.ac_couple_check.SetValue(settings['ac_couple_check'])
     if 'diff_hide_short' in settings:

@@ -262,6 +262,9 @@ FLAG_PARAMS = {
     '--grid-step': 'grid_step',
     '--max-iterations': 'max_iterations',
     '--max-ripup': 'max_ripup',
+    # #1896: the plane finalize's limit on pads per tap via (route.py and the
+    # standalone repair_planes.py)
+    '--tap-via-share': 'tap_via_share',
     '--ripup-abandon-metric': 'ripup_abandon_metric',
     '--ripup-blocker-select': 'ripup_blocker_select',
     # route.py spells the strategy flag --ordering; the GUI control (and the
@@ -374,6 +377,10 @@ LIST_FLAGS = {
     # allowlist survives as a list param that ai_plan's alias routes to the
     # diff tab's polarity_swap_nets_text field.
     '--polarity-swap-nets': 'polarity_swap_nets',
+    # #1869: route_diff's intra-pair lane ('auto' or P_NET=REF.PAD:REF.PAD ...,
+    # nargs='+'). The plan executor space-joins the list into the diff tab's
+    # `diff_pair_intra_lane` text control, which splits on whitespace again.
+    '--diff-pair-intra-lane': 'diff_pair_intra_lane',
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
@@ -861,7 +868,8 @@ def parse_command(argv, cwd=None):
     # it still did (26 kept bga_fanout steps on 18 corpus boards).
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--via-span', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--plane-net-layers', '--keep-away'):
+              '--rip-existing-nets', '--plane-net-layers', '--keep-away',
+              '--diff-pair-intra-lane'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step
