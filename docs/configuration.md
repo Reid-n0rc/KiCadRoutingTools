@@ -312,28 +312,58 @@ clean; absent when the board has no such rule).
 is one rule-area predicate or an OR of them, e.g.
 `(rule "room" (constraint clearance (min 0.09mm)) (condition "A.insideArea('ROOM')"))`
 or `"A.insideArea('SOC_ROOM') || A.insideArea('RAM_ROOM')"`
-on named rule areas, is routed to by position (no flag, no GUI
-control; `area_clearance.py`): a track inside the area, on a layer the area
-is drawn on, is held to the rule's value in place of the class value against
-everything, and so is a via where the area covers every copper layer of the
-board. Outside the area the class values apply as before; around an area
-whose rule is ABOVE the run's clearance, a ring one rule value plus half a
-track wide keeps the larger of the two. The base obstacle map, the per-net
-keep-outs and the stamp functions all compose the two stamps, so rip-up and
-retry see the same picture, and the terminal check and the end-of-run pad
-audit hold a track in the area to the area's value. The rule's value is raised to what the fab can physically
-make (the advanced rung, or `--fab-overrides`), as an explicit `--clearance`
-is, and the run says when it was. The run names the rule
-as routed to, and the DRC writeback keeps `rules.min_clearance` at or below
-it. The rule is read in KiCad's order, the last matching rule winning: in
-the room it replaces the class values and every rule BEFORE it in the file,
-while a per-layer rule or a class-, type- or net-scoped rule that comes
-AFTER it still binds its own pairs there. Not routed to, and said so: a
-condition with more than rule-area predicates
-(`A.insideArea('ROOM') && A.NetClass == 'HS'`) and `enclosedByArea()`. One limit of
-a rule that tightens: a long track that crosses the area's edge is bound by
-the rule along its whole length in KiCad, and only the part near the area is
-held to it here, so grade such a board with `check_drc.py`.
+on named rule areas, is routed to (no flag, no GUI control;
+`area_clearance.py`). KiCad binds a pair when either ITEM's copper meets the
+area on the layer the pair is on (kicad-cli 10.0.6, probe boards): a track
+partly in the area is bound along its whole length, a track that stops short
+of it, round cap included, is not, and a via in an area drawn on F.Cu only is
+bound against F.Cu copper only. The router reads it the same way:
+
+- every keep-out is stamped twice and composed, the class values outside the
+  areas and the rule's value inside (a track cell is inside on the layers the
+  area is drawn on, a via cell where the area covers every copper layer), in
+  the base obstacle map, the per-net keep-outs, the stamp functions, and the
+  plane steps' via and connection maps (pour taps, the in-run plane
+  finalize, plane repair), so rip-up and retry see the same picture;
+- around an area whose rule is ABOVE the run's clearance (a tightened area),
+  a ring keeps the larger of the two stamps, and laid copper that touches the
+  area (a pad, an input track, a via) is held at the rule's value along its
+  whole extent. The ring is as wide as the rule's value plus a track width
+  and half the largest via or track, so copper that does not touch the area
+  is also held at the rule's value that close to it -- a route that needs the
+  class value there is refused;
+- the run's tracks are SPLIT where they leave a tightened area, half the
+  widest track plus 0.01 mm past its edge, so the piece outside is an item
+  KiCad does not bind -- at the start and end of the cleanup pipeline and on
+  the board the route step ships, copper unchanged, input copper left whole;
+  no via of the run straddles a tightened area's edge;
+- every post-route pass that prices a pair (graze prune, detour weld,
+  octolinear re-bend, micro-shift, via nudge, smoothing, stub-gap snap,
+  soft-joint bridges, width neck), the terminal check and the end-of-run pad
+  audit price it at the area's value where the area binds either item.
+
+The rule's value is raised to the fab floor every other rule channel uses
+(`fab_tiers.rule_fab_floors`: the tier's floor, or `--fab-overrides`), so a
+room routes as the same value in a layer or class rule would, and the run
+says when it was. The run names the rule as routed to, and the DRC writeback
+keeps `rules.min_clearance` at or below it. The rule is read in KiCad's
+order, the last matching rule winning: in the room it replaces the class
+values and every rule BEFORE it in the file, while a per-layer rule or a
+class-, type- or net-scoped rule that comes AFTER it still binds its own
+pairs there. Not routed to, and said so: a condition with more than
+rule-area predicates (`A.insideArea('ROOM') && A.NetClass == 'HS'`) and
+`enclosedByArea()`; a rule with another constraint beside its clearance and
+track width (a `disallow`) is applied whole or not at all, by the reader of
+that constraint. Inside a
+tightened area KiCad grades a diff pair's P against its N at the area's
+value (the custom rule outranks the pair's implicit gap rule), and a coupled
+pair is laid at one gap, so a pair built below the area's value either keeps
+out of the area at its own gap (the area does not lie on the span of its
+pads: a net-filtered keep-out takes away only a detour through it) or, where
+the area lies on that span, is built at the area's value for the run -- its
+impedance changes, said per pair on the console and in
+`JSON_SUMMARY.area_pair_gaps` (`how` `around` / `widened`, `built_gap`,
+`routed`). The run still warns on a pair whose shipped gap is below the area.
 
 **Track width in a rule area.** A `track_width` rule with the same kind of
 condition gives the room a width, its `opt` value or else its `min`, raised
@@ -341,19 +371,36 @@ to what the fab can physically make:
 `(rule "room" (constraint track_width (min 0.09mm)) (condition "A.insideArea('ROOM')"))`.
 Where it is narrower than the run's track, the keep-outs in the room reserve
 the narrower track, and a net routed no wider than the run's width may NECK
-to the room's width there: its track is drawn at the room's width only on
-the stretches where its own width would not keep the room's clearance (with
-half a grid step to spare), and at its own width everywhere else, so a
-controlled-width net is narrow between the balls it squeezes past and not
-for its whole run through the room. A neck starts at most 1.5 grid steps
-outside the room's edge, so the narrow piece is one KiCad holds to the rule.
-A net routed wider (a power width, an impedance width) keeps its width and
-gets the search margin that fits the room's reserve. Rules on one area are
-read together, so one room can set both a clearance and a width; a room's
-width is not routed to when a later `track_width` rule asks for a wider
-track. A necked track is graded at the rule and not at Board Setup's
-`min_track_width` (measured on kicad-cli 10.0.8), so the DRC writeback
-leaves that minimum alone, on both fronts.
+to the room's width there. Its track is split where it enters and leaves the
+room grown by 1.5 grid steps (the split helpers the tightened-area split
+uses), each piece whose copper meets the room is drawn at the room's width,
+and then every grid step of it where the net's own width keeps the clearance
+KiCad holds that copper to (the room's value where the room binds it or its
+neighbour, the class value elsewhere, and the board's copper-to-hole floor
+against holes) is put back to the net's width. So a controlled-width net is
+narrow between the balls it squeezes past and not for its whole run through
+the room. A net routed wider (a power width, an impedance width) keeps its
+width; its search margin is computed against the room's reserve as well,
+and since the router takes one margin per layer, that larger margin holds on
+the whole of every layer the room is drawn on, not only inside the room.
+Rules on one area are read together, so one room can set both a clearance
+and a width; a room's width is not routed to when a later `track_width` rule
+asks for a wider track.
+
+A neck is the board's own rule, so it is allowed under every
+`--escalation` policy (`off` included) and is not a narrowing below a
+request: the shipped-width reports (power widths, impedance and class widths,
+pair widths) leave it out and `--strict-sizes` does not fail on it. Every
+neck the run ships is said instead, on the console (`Rule-area necks: ...`)
+and in `JSON_SUMMARY` / `--json-out` / the GUI's results as `area_necks`,
+one row per net, room and layer with the width and the necked length. A
+track a room's `track_width` rule binds -- by KiCad's reading, its copper
+meets the room -- is graded at the rule and not at Board Setup's
+`min_track_width` (kicad-cli 10.0.6), so the DRC writeback leaves that
+minimum alone on both fronts and `check_complete.py --authored-from` grades
+such a track at the rule; a room rule that cannot be read is an ERROR on the
+console, and the writeback then measures no track rather than lowering the
+minimum to a width it could not judge.
 
 **Track bans.** A `disallow track` rule scoped without a rule area -- the usual
 way to keep a class on some layers, e.g.
@@ -380,7 +427,12 @@ layers only. The via type is read off the span: `micro` for two neighbouring
 layers one of which is an outer layer (`F.Cu In1.Cu`), `blind` for a longer span
 that reaches one outer layer, `buried` for a span that reaches neither
 (`In1.Cu In6.Cu` on an 8-layer board); `--via-span-type` overrides it where the
-span allows. The whole stack is no span: through vias, as without the flag.
+span allows. A micro via is laser drilled from an outer layer to the layer next
+to it, so `micro` is refused on a longer span (that is a blind via,
+mechanically drilled). The whole stack is no span: through vias, as without the
+flag. On a board whose file format predates KiCad 10, which has no `buried`
+word, a buried span's vias are written `blind` (KiCad 9's one blind/buried
+type) on the same layer pair, and the run says so.
 
 - **What blocks a via of the span** is the copper on the span's layers, and
   every drilled pad (its barrel passes through the span). Tracks, pours and
@@ -391,7 +443,8 @@ span allows. The whole stack is no span: through vias, as without the flag.
 - **Size.** With no `--via-size` / `--via-drill`, a micro via span draws the
   board's Default net-class micro via (`microvia_diameter` / `microvia_drill`)
   on every net. The fab floor's via sizes are a mechanical drill's and are not
-  applied to it, and its size is not written into the output project's via or
+  applied to it, whether the size is the class's or given (the GUI's via
+  controls read the same `via_span.laser_drilled`), and its size is not written into the output project's via or
   drilled-hole minimums (`check_drc` grades a micro via at the micro via
   minimums, #1844). A blind or buried span uses the run's via as a through via
   step does.
@@ -423,12 +476,24 @@ span allows. The whole stack is no span: through vias, as without the flag.
   a ground pour is already on one of those layers. Pour the planes before
   the steps that tap them or route pairs under a span, and expect no return
   vias for a span that does not include the ground plane's layer.
+- **The summary says so.** `JSON_SUMMARY` and `--json-out` carry `via_span` on
+  every via-span step: `{"layers": [top, bottom], "type": ..., "plane_finalize":
+  "span", "zones": N, "zones_off_span": M}` -- the finalize's taps are vias of
+  the span, and M of the board's N pours lie on layers the span does not have
+  and are left to the plane step.
 - **Copper outside the span is held in place.** A via-span step lays copper on
   the span only, so it could not lay an escape's stub and via again: every
   existing track on another layer, and every via with copper on a layer the
   span lacks, is immutable for the step (`via_span.hold_outside_copper`). The
-  step still rips and retries its own routes, so a net it cannot complete
-  keeps its landings for a later step.
+  step still rips and retries its own routes (a rip, a pre-existing net's rip
+  and `--force-reroute` take the net's other copper and leave the held items),
+  so a net it cannot complete keeps its landings for a later step. The hold is
+  no sense hold: a route end beside a held escape is bridged onto it as onto
+  any copper of its net.
+- **The step's maps are the span's throughout.** The base map, each net's
+  cache and every rebuild after a rip or a route read the board through the
+  same view, so a routed net's pad outside the span blocks no via site after a
+  rip either.
 
   ```bash
   # micro-via escapes at every pad, then the inner layers with buried vias
@@ -466,7 +531,7 @@ On an 8-layer board with a 0.8 mm BGA over a field of bottom-side pads
 (`tests/fixtures/1842`), a bare route completes 25 of 36 nets with through
 vias; `--via-span F.Cu In1.Cu` completes all 36 with micro vias, clean in
 `check_drc`, `check_connected` and KiCad's DRC against the board's own rules.
-The two-step form above lays 72 micro-via escapes and then routes 34 of the 36
+The two-step form above lays 72 micro-via escapes and then routes 35 of the 36
 on the inner layers with buried vias, both steps clean in `check_drc` and
 KiCad's DRC.
 
@@ -583,6 +648,48 @@ it binds are held to 1 mm from Edge.Cuts`, and its end grades the step's copper:
 itself inside it (check_drc accepts it as `edge-exempt-pad`; KiCad flags both). The
 rule stays in the rule file: the output project's `min_copper_edge_clearance`
 records what the step resolved before it.
+
+**Hole clearance rules (#1853).** A `.kicad_dru` `hole_clearance` rule holds the
+route step's copper off the HOLES of other nets, on both fronts, with no flag or
+control, and `check_drc.py` grades the same pairs (`hole_rule_grade`). KiCad
+measures it from the hole's wall, so it binds wherever it is wider than the ring or
+pad around the hole plus the copper clearance:
+
+- a routed track is kept the rule's distance from the hole of another net's via,
+  plated pad and unplated pad, on each layer the rule names;
+- a via the step adds keeps its own hole that far from other nets' tracks, vias
+  and pads, and its copper that far from their holes;
+- a via placed off the obstacle map (the rescue's pad escape, a layer-swap or
+  stub-switch via) is refused by `check_drc.hole_rule_refusal`, which runs the
+  grader over the board near it.
+
+The value is the last rule in the file whose condition and `(layer ...)` clause
+match the pair, read either way round, as KiCad decides it; a hole's own net is
+exempt. One obstacle map serves every net a step routes, so a hole is held at the
+largest value the rules give any other net against it. A rule of severity `ignore`
+binds nothing, and a rule whose condition the tools do not read is named `NOT
+honoured` and left to the grade. The step prints `.kicad_dru rule 'x':
+hole_clearance min 0.254 mm: routed tracks and vias are kept that far from the
+holes of other nets' vias and pads`. The generators that test a via site by
+their own means ask the same grader: `bga_fanout.py` (dogbone and under-pad),
+`qfn_fanout.py`, `route_planes.py --add-gnd-vias` and the plane taps each refuse a
+site through `check_drc.HoleRuleGate` (the board's copper and holes indexed once)
+or `hole_rule_refusal`. The gate reads the board as it stood when the step began:
+two vias the same step lays are kept apart by the step's own tests, at the copper
+clearance and the hole-to-hole minimum, and `check_drc.py` grades the result at
+the rule.
+**Via count rules (#865).** A `.kicad_dru` `via_count (max N)` rule with N above 0
+gives each net it binds a via budget, on both fronts, with no flag or control
+(`max 0` is a via ban and is honoured as one). A net is still routed whatever it
+takes. A route that would put the net over its max, counting the vias the net
+already has, is searched again at 4 and then 16 times the via cost, and the route
+with the fewest vias is kept; a net inside its budget on the first try is not
+routed twice. The step prints `.kicad_dru rule 'x': via_count max 1: 3 net(s) are
+routed again at a higher via cost when a route would exceed it ...`, and a net that
+still ends over its max is listed when the step ends, on the console and in
+`JSON_SUMMARY.design_rules.via_count` (`nets`, and `over`: `net`, `vias`, `max`,
+`rule`). `check_drc.py` grades the count as KiCad's too_many_vias does (#1707). A
+`min` is graded only.
 
 **A rule file KiCad refuses.** One thing KiCad cannot load in a `.kicad_dru` makes
 it enforce NONE of the file's rules, with exit 0 and nothing printed (measured on

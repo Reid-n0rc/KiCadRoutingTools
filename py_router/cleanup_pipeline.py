@@ -145,17 +145,23 @@ def _centre_stub_net_ids(pcb_data):
     length window, and the net left the window by a via radius.
 
     The length-rule nets are the ones check_drc's length pass grades
-    (check_drc.length_rule_nets). The graze passes' read-only set (#1759)
-    stays _skew_bound_net_ids."""
-    ids = set(_skew_bound_net_ids(pcb_data))
+    (check_drc.length_rule_nets). The graze passes' read-only set is the
+    same nets (#1759, #1851)."""
+    return set(_skew_bound_net_ids(pcb_data)) | _length_window_net_ids(pcb_data)
+
+
+def _length_window_net_ids(pcb_data):
+    """Nets a `.kicad_dru` length rule holds to a window
+    (check_drc.length_rule_nets): graded by check_drc's length pass (#1313)
+    and by KiCad, and re-tuned by no later route.py step."""
     try:
         from check_drc import length_rule_nets
-        ids |= set(length_rule_nets(getattr(pcb_data, 'source_path', '') or '',
+        return set(length_rule_nets(getattr(pcb_data, 'source_path', '') or '',
                                     pcb_data).bound)
     except Exception as e:                                      # noqa: BLE001
         print(f"  (#1798 .kicad_dru length-rule nets unread, their via-centre "
-              f"stubs not held: {type(e).__name__}: {e})")
-    return ids
+              f"stubs and input copper not held: {type(e).__name__}: {e})")
+        return set()
 
 
 @dataclass
@@ -253,6 +259,10 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                   into the track instead. It must run last to
                                   catch the joints close, smooth and the cycle
                                   prune each leave behind.
+     (#1843) area_clearance.split_results, after ``freeze_hook`` and again
+        after step 11: the run's tracks split where they leave an area whose
+        clearance rule is above the run's (copper unchanged), so every pass
+        reads each piece as the item KiCad grades. Inert without such a rule.
 
     ``label`` prefixes the progress prints (e.g. "Diff-pair "). The pass
     switches exist for front parity, not taste:
@@ -362,6 +372,19 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if freeze_hook is not None:
         freeze_hook()
 
+    # #1843: the run's tracks split where they leave a tight rule area's
+    # split zone, so every pass below reads each piece as the item KiCad
+    # will (the piece outside is not bound by the area). Again at the end,
+    # after the passes that join or re-lay copper. Inert without such a rule.
+    # The split moves no copper, so it takes every track of the run, not only
+    # the cleanup's scope (a pair kept out of it still ships its pieces).
+    from area_clearance import split_results as _area_split
+    _as_n = _area_split(results, pcb_data, config, None)
+    counts['area_edge_splits'] = _as_n
+    if _as_n:
+        print(f"{label}Rule-area edges: split {_as_n} track(s) where they leave "
+              f"a tightened area (#1843)")
+
     # #436/#438: cross-class + board-edge floors, threaded into every copper-
     # MOVING cleanup pass so a re-bend / micro-shift / via-nudge / connector-snap
     # honors each foreign net's class clearance and the board edge rule (not the
@@ -374,15 +397,20 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # micro-shift) run with the input copper of skew-graded nets read-only:
     # those nets go in a second call with keep_input_copper set, the rest in
     # the first as before. Inert (one call each) when no skew rule binds a
-    # net in scope.
+    # net in scope. #1851: and of the nets a .kicad_dru length rule holds to a
+    # window, which no later step re-tunes either.
     _ro_ids = set()
     if not (keep_input_copper or _judge):
-        _ro_ids = _skew_bound_net_ids(pcb_data)
+        _len_ids = _length_window_net_ids(pcb_data)
+        _ro_ids = _skew_bound_net_ids(pcb_data) | _len_ids
         if _ro_ids and scope_net_ids is not None:
             _ro_ids &= set(scope_net_ids)
         if _ro_ids:
-            print(f"{label}Graze passes: {len(_ro_ids)} skew-graded net(s) keep "
-                  f"their input copper (#1759): "
+            # the #1759 line as it was when only skew rules hold nets
+            _what = ("skew- or length-graded net(s) keep their input copper "
+                     "(#1759, #1851): " if _ro_ids & _len_ids else
+                     "skew-graded net(s) keep their input copper (#1759): ")
+            print(f"{label}Graze passes: {len(_ro_ids)} {_what}"
                   + ', '.join(sorted(pcb_data.nets[i].name for i in _ro_ids
                                      if i in pcb_data.nets)[:6])
                   + (' ...' if len(_ro_ids) > 6 else ''))
@@ -418,7 +446,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         # coincident (picodvi DVI_CK terminal-leg jog).
         _wd_segs, _wd_nets, _wd_strip = _graze_pass(
             weld_redundant_grazing_detours, scope_net_ids,
-            clearance=config.clearance, net_clearances=_nc)
+            clearance=config.clearance, net_clearances=_nc,
+            config=config)  # #1843: area clearance rules
         counts['detours_welded'] = _wd_segs
         _trace('weld_detour')
         strip.extend(_wd_strip)
@@ -704,6 +733,13 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _mc_n:
             print(f"{label}Merged {_mc_stats.get('joints', 0)} collinear joint(s) "
                   f"on {_mc_nets} net(s): -{_mc_n} redundant segment(s) (#811)")
+
+    # #1843: the collinear merge (and smoothing) can join a split back
+    _as_n = _area_split(results, pcb_data, config, None)
+    counts['area_edge_splits'] += _as_n
+    if _as_n:
+        print(f"{label}Rule-area edges: split {_as_n} track(s) the passes above "
+              f"joined across a tightened area's edge (#1843)")
 
     # The passes above edit pcb_data's copper in place; anything cached
     # against the old copper must not answer for the new.
