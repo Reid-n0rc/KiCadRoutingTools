@@ -655,8 +655,10 @@ class DifferentialTab(wx.Panel):
         self.diff_pair_intra_lane.SetToolTip(
             "Match, record and grade each intra-matched pair on its lane -- the "
             "copper path between two pads -- instead of total copper, so a branch "
-            "to a third pad counts as a stub (#1869). 'auto' (the ends of each "
-            "member's lane) or P_NET=REF.PAD:REF.PAD ..., space separated. "
+            "to a third pad counts as a stub (#1869). 'auto' (the two terminals "
+            "the pair step routes) or P_NET=REF.PAD:REF.PAD ..., space separated. "
+            "Needs intra-pair matching; a pair a .kicad_dru skew rule binds is "
+            "matched on total copper, as KiCad grades the rule. "
             "Empty: total copper, as KiCad's skew DRC measures.")
         lane_row.Add(self.diff_pair_intra_lane, 1, wx.ALIGN_CENTER_VERTICAL)
         options_sizer.Add(lane_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
@@ -1519,6 +1521,9 @@ class DifferentialTab(wx.Panel):
                 # step_hole_clearance, from the tab's applied lists.
                 _hole_clr = self._held_hole_clearance(board, results_data,
                                                       eff_clearance)
+                # #1842: the micro vias' own rule, as fix_project_for_output writes it
+                from .gui_utils import live_micro_via_rule
+                live_micro_via_rule(self.pcb_data, board, results_data, eff_clearance)
                 targets = compute_targets(
                     clearance=eff_clearance,
                     hole_clearance=_hole_clr,

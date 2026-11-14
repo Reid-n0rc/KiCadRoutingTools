@@ -826,10 +826,27 @@ the GUI diff tab gets the same answer:
   (coupled run over the pair's length, capped at 1), `coupled_share_floor` and
   `coupled`. A member whose copper runs back along itself (#1873: a hybrid
   terminal leg laid beside its own coupled middle) adds `self_overlap_mm`
-  (`{p, n}`, `net_queries.net_self_overlap`: two same-layer passes closer than a
-  track width over more than a width) and a `Self-overlap:` line: `skew_mm` and
-  the intra-pair status count all of a member's copper, as KiCad's skew rule
-  does, so that stretch is in them twice.
+  (`{p, n}`, `net_queries.net_self_overlap`: two same-layer passes within 5
+  degrees of parallel whose copper overlaps over more than a width, counted
+  where it does, so two passes that converge count from where they meet and a
+  narrow pass inside a wider track counts too) and every such overlap in
+  `self_overlaps` (`member`, `layer`, the two passes, `centre_gap_mm`,
+  `along_mm`, `width_mm`). A `Self-overlap:` line names a pair with one longer
+  than twice its track width: `skew_mm` and the intra-pair status count all of
+  a member's copper, as KiCad's skew rule does, so that stretch is in them
+  twice. The pair's `intra_pair_matching` record carries the totals beside its
+  `status`, so a `matched` there can be read with them. A member with more
+  segments than the search takes is listed in `self_overlap_not_searched`
+  (and reads `null`, not 0, in `self_overlap_mm` beside a partner that has
+  some), and a search that failed is `self_overlap_error`: none of the three
+  keys means both members were searched and have none.
+  The direct hybrid no longer lays the shape it was found on: a terminal leg
+  that ran beside its own coupled middle up to the middle's end is joined to
+  the middle where the two first meet, and the doubled stretch (the middle's
+  tail and the leg copper on it) is not laid
+  (`diff_pair_routing._fold_legs_onto_middle`; the step prints `leg fold
+  (#1873): net N joins its coupled middle X mm short of the middle's end`). A
+  tail that carries the net's own via is left as it was.
 - **A pair routed but not coupled** is outcome `uncoupled`, listed in
   `JSON_SUMMARY.uncoupled_diff_pairs` (and the GUI's completion dialog), and is
   **not** counted in `routed_diff_pairs` / `successful`. The end-of-run summary
@@ -1031,7 +1048,7 @@ total copper, the signal paths differ. With a lane the pair is matched, recorded
 and graded on the copper path between two pads, and a branch is a stub:
 
 ```bash
-# the ends of each member's lane, read off its copper
+# the two terminals the pair step routes the pair between
 python3 py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "/DATA*" \
     --diff-pair-intra-match --diff-pair-intra-lane auto
 
@@ -1045,10 +1062,20 @@ The pads are recorded with the tolerance (`kicad_routing_tools.intra_pair_tolera
 `check_drc.py` prints `Recorded lane (route_diff, #1869): ... skew 0.1050 mm on the
 lane` with each member's stub length, carries the rows in `--json` under
 `recorded_lanes`, and `board_score.py` adds `lane` and `lane_skew_mm` to the pair's
-record beside the total-copper `skew_mm`. A `.kicad_dru` skew rule over the same
-nets is still graded on total copper, as KiCad grades it. A lane naming a net no
-pair of the step has, or pads its nets lack, refuses with the reason (exit 2). In
-the GUI it is the differential tab's **Intra-pair lane** field.
+record beside the total-copper `skew_mm`.
+
+`auto` is the pair step's own two end terminals: a two-terminal pair's two, a
+multi-point pair's coupled legs' ends (a branch the step leaves for a later step
+is not the lane, however long). N's lane ends on the same two parts as P's; a
+pair whose coupled legs do not form one path, or whose P and N end on different
+parts, gets no lane, is matched on total copper, and the step says why. A lane
+applies only to a pair the step intra-matches (with no `--diff-pair-intra-match`
+the step says the lane is unused) and that no `.kicad_dru` skew rule binds: KiCad
+grades such a rule on total copper, so that pair is matched on total copper, and
+the console line, the record and the step's `intra_pair_matching` row say so
+(`lane_ignored`). A lane naming a net no pair of the step has, or pads its nets
+lack, refuses with the reason (exit 2). In the GUI it is the differential tab's
+**Intra-pair lane** field.
 
 ### Time Matching
 

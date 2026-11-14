@@ -54,7 +54,8 @@ GATE_RE = re.compile(r'JSON_IMPROVEMENT_GATE: (\{.*\})')
 # every JSON_SUMMARY of that run when they differ from what a printed summary
 # carried (see restamp_shipped_rules).
 SHIPPED_RULES_RE = re.compile(r'JSON_SHIPPED_RULES: (\{.*\})')
-# The outermost run's audits of the board it SHIPS (#1760: rule_area_keepouts),
+# The outermost run's audits of the board it SHIPS (#1760: rule_area_keepouts;
+# #1896: tap_vias),
 # measured after every JSON_SUMMARY of that run, as {summary key: value}.
 # route.py sets the same keys on the merged `--json-out` document, so a reader
 # of the log alone (merge_route_summaries) must apply them too.
@@ -123,8 +124,7 @@ def sink_summary(summary: Dict) -> None:
 
 
 #: The keys of `design_rules` that come from one run's config, not the ledger
-DESIGN_RULES_PER_RUN = ('unsupported_rules', 'scoped_clearance', 'kicad_refuses_file',
-                        'via_count')
+DESIGN_RULES_PER_RUN = ('unsupported_rules', 'scoped_clearance', 'kicad_refuses_file')
 
 
 def _stamp_rules(doc: Dict, min_clearance_used, design_rules) -> None:

@@ -91,24 +91,24 @@
 	)
 	(gr_rect
 		(start 0 0)
-		(end 30 30)
+		(end 30 12)
 		(stroke
 			(width 0.1)
 			(type default)
 		)
 		(fill no)
 		(layer "Edge.Cuts")
-		(uuid "8801dd91-15b3-5b6b-af57-c48ed1360302")
+		(uuid "3c421e5a-0a7f-5a50-aab3-5ecb53d7d121")
 	)
 	(footprint "fixture:P1"
 		(layer "F.Cu")
-		(uuid "29013e53-765b-50e4-81d6-3371f35860ca")
-		(at 10 3)
+		(uuid "016d2905-847b-5aec-ac47-30505ae27a2d")
+		(at 10 4)
 		(property "Reference" "P1"
 			(at 0 0 0)
 			(layer "F.SilkS")
 			(hide yes)
-			(uuid "4509333d-41e4-507d-8cea-d17297d9b069")
+			(uuid "98c20e2e-c1a2-53c2-81a2-3fe80c14d6b4")
 			(effects
 				(font
 					(size 1 1)
@@ -122,18 +122,18 @@
 			(size 0.6 0.6)
 			(layers "F.Cu" "F.Mask")
 			(net "SIG")
-			(uuid "08308310-0a35-5231-8ee4-5cbba84aff74")
+			(uuid "e216a95c-f1d1-5cd6-ac15-5d76ad1cb9b0")
 		)
 	)
 	(footprint "fixture:P2"
 		(layer "F.Cu")
-		(uuid "f1252fcb-119c-5131-ad62-6aa5384f7a42")
-		(at 20 3)
+		(uuid "0e8324ab-d0f6-536c-b274-31879717cde0")
+		(at 20 4)
 		(property "Reference" "P2"
 			(at 0 0 0)
 			(layer "F.SilkS")
 			(hide yes)
-			(uuid "ae1611c7-dd35-564c-baa5-89f61495952e")
+			(uuid "b72c49a6-99da-5903-8867-9aeba57df61c")
 			(effects
 				(font
 					(size 1 1)
@@ -147,17 +147,121 @@
 			(size 0.6 0.6)
 			(layers "F.Cu" "F.Mask")
 			(net "SIG")
-			(uuid "0ec6ae0f-84b4-5ea7-a965-00cfd1e84bbd")
+			(uuid "5ba83622-9ee6-5175-b4f5-3ebcc7916d4a")
 		)
 	)
-	(segment
-		(start 15 0.5)
-		(end 15 29.5)
-		(width 0.2)
-		(locked yes)
+	(footprint "fixture:P3"
 		(layer "F.Cu")
-		(net "WALL")
-		(uuid "a5bd7cc5-e9b4-57be-85ce-e9a5e89aa385")
+		(uuid "6fc960f5-5882-5e29-a5d0-c01031df768c")
+		(at 10 2.5)
+		(property "Reference" "P3"
+			(at 0 0 0)
+			(layer "F.SilkS")
+			(hide yes)
+			(uuid "7550217f-44e4-58db-8b57-0e95c7e34165")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(attr smd)
+		(pad "1" smd rect
+			(at 0 0)
+			(size 0.6 0.6)
+			(layers "F.Cu" "F.Mask")
+			(net "SLOW")
+			(uuid "8610ac3f-c453-5f49-8681-9cef3bf0d9ba")
+		)
+	)
+	(footprint "fixture:P4"
+		(layer "F.Cu")
+		(uuid "2e752eb0-94be-591b-aa34-fdc5a08e1eaa")
+		(at 20 2.5)
+		(property "Reference" "P4"
+			(at 0 0 0)
+			(layer "F.SilkS")
+			(hide yes)
+			(uuid "5e1e32a2-5585-572a-ae5b-aa37297e5f41")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(attr smd)
+		(pad "1" smd rect
+			(at 0 0)
+			(size 0.6 0.6)
+			(layers "F.Cu" "F.Mask")
+			(net "SLOW")
+			(uuid "a7d1fc42-dcfc-508c-8f1a-606174d8aa7d")
+		)
+	)
+	(zone
+		(net "GND")
+		(net_name "GND")
+		(layer "In1.Cu")
+		(uuid "7024204b-857c-55cf-9902-daeb10cc0fc1")
+		(hatch edge 0.5)
+		(connect_pads
+			(clearance 0.2)
+		)
+		(min_thickness 0.2)
+		(filled_areas_thickness no)
+		(fill
+			(thermal_gap 0.3)
+			(thermal_bridge_width 0.3)
+		)
+		(polygon
+			(pts
+				(xy 1 1) (xy 14.5 1) (xy 14.5 11) (xy 1 11)
+			)
+		)
+	)
+	(zone
+		(net "GND")
+		(net_name "GND")
+		(layer "In1.Cu")
+		(uuid "bfd54d2a-2eaf-5cd8-bdd9-0045f132e9ce")
+		(hatch edge 0.5)
+		(connect_pads
+			(clearance 0.2)
+		)
+		(min_thickness 0.2)
+		(filled_areas_thickness no)
+		(fill
+			(thermal_gap 0.3)
+			(thermal_bridge_width 0.3)
+		)
+		(polygon
+			(pts
+				(xy 15.5 1) (xy 29 1) (xy 29 11) (xy 15.5 11)
+			)
+		)
+	)
+	(zone
+		(net "GND")
+		(net_name "GND")
+		(layer "In1.Cu")
+		(uuid "6d51c00b-54f5-5910-814a-28b873b43086")
+		(hatch edge 0.5)
+		(connect_pads
+			(clearance 0.2)
+		)
+		(min_thickness 0.2)
+		(filled_areas_thickness no)
+		(fill
+			(thermal_gap 0.3)
+			(thermal_bridge_width 0.3)
+		)
+		(polygon
+			(pts
+				(xy 14.4 7.5) (xy 15.6 7.5) (xy 15.6 11) (xy 14.4 11)
+			)
+		)
 	)
 	(embedded_fonts no)
 )

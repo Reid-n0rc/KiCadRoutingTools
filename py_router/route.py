@@ -1316,14 +1316,35 @@ def _print_length_moved(rows, what):
               + " -- route.py does not re-tune it (#1851)")
 
 
+def _late_board1798(pcb_data, output_file, return_results, results_data,
+                    write_model):
+    """The board the end-of-run passes read and change, for the #1798 skew
+    and #1851 length measurements: the written file on the CLI (a re-parse),
+    the write model on the GUI, pcb_data itself on the "nothing to route"
+    return. None when there is no such board (no file written)."""
+    import copy as _copy
+    if return_results:
+        board = _copy.copy(pcb_data)
+        if write_model is not None:
+            segs_by_net, vias_by_net = write_model(results_data or {})
+            board.segments = [x for _l in segs_by_net.values() for x in _l]
+            board.vias = [x for _l in vias_by_net.values() for x in _l]
+        else:
+            board.segments = list(pcb_data.segments)
+            board.vias = list(pcb_data.vias)
+        return board
+    if output_file and os.path.isfile(output_file):
+        from kicad_parser import parse_kicad_pcb as _pk1798
+        return _pk1798(output_file)
+    return None
+
+
 def _late_length_snapshot1851(pcb_data, output_file, return_results, results_data,
                               write_model, rule_path, scope_names):
     """#1851: check_drc.length_window_snapshot on the board the end-of-run
-    passes read and change (the written file on the CLI, the write model on
-    the GUI, pcb_data itself on the "nothing to route" return), for the nets
-    in `scope_names`. {} when no length rule binds one, which costs no parse,
-    and when the measurement fails, which is said on the console."""
-    import copy as _copy
+    passes read and change (_late_board1798), for the nets in `scope_names`.
+    {} when no length rule binds one, which costs no parse, and when the
+    measurement fails, which is said on the console."""
     try:
         from check_drc import length_rule_nets, length_window_snapshot
         names = set(scope_names)
@@ -1331,19 +1352,9 @@ def _late_length_snapshot1851(pcb_data, output_file, return_results, results_dat
         if not any(pcb_data.nets[m].name in names for m in bound
                    if m in pcb_data.nets):
             return {}
-        if return_results:
-            board = _copy.copy(pcb_data)
-            if write_model is not None:
-                segs_by_net, vias_by_net = write_model(results_data or {})
-                board.segments = [x for _l in segs_by_net.values() for x in _l]
-                board.vias = [x for _l in vias_by_net.values() for x in _l]
-            else:
-                board.segments = list(pcb_data.segments)
-                board.vias = list(pcb_data.vias)
-        elif output_file and os.path.isfile(output_file):
-            from kicad_parser import parse_kicad_pcb as _pk1851
-            board = _pk1851(output_file)
-        else:
+        board = _late_board1798(pcb_data, output_file, return_results,
+                                results_data, write_model)
+        if board is None:
             return {}
         ids = {nid for nid, n in board.nets.items() if n.name in names}
         return length_window_snapshot(board, rule_path, ids)
@@ -1369,13 +1380,11 @@ def _skew_by_name(snap):
 def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
                             write_model, skew_path, scope_names):
     """#1798: the #1759 skew measurement, on the board the end-of-run passes
-    (_late_strict_collapse1063 and the rest) read and change -- the written
-    file on the CLI, the write model on the GUI, pcb_data itself on the
-    "nothing to route" return -- keyed by name (_skew_by_name), for the
-    groups with a member in `scope_names`. {} when no skew rule binds a net
-    in scope, which costs no parse, and when the measurement fails, which is
-    said on the console."""
-    import copy as _copy
+    (_late_strict_collapse1063 and the rest) read and change
+    (_late_board1798), keyed by name (_skew_by_name), for the groups with a
+    member in `scope_names`. {} when no skew rule binds a net in scope, which
+    costs no parse, and when the measurement fails, which is said on the
+    console."""
     try:
         from check_drc import (skew_rule_groups, skew_group_snapshot,
                                recorded_chain_groups)
@@ -1386,19 +1395,9 @@ def _late_skew_snapshot1798(pcb_data, output_file, return_results, results_data,
         if not any(pcb_data.nets[m].name in names for _r, ms in groups
                    for m in ms if m in pcb_data.nets):
             return {}
-        if return_results:
-            board = _copy.copy(pcb_data)
-            if write_model is not None:
-                segs_by_net, vias_by_net = write_model(results_data or {})
-                board.segments = [x for _l in segs_by_net.values() for x in _l]
-                board.vias = [x for _l in vias_by_net.values() for x in _l]
-            else:
-                board.segments = list(pcb_data.segments)
-                board.vias = list(pcb_data.vias)
-        elif output_file and os.path.isfile(output_file):
-            from kicad_parser import parse_kicad_pcb as _pk1798
-            board = _pk1798(output_file)
-        else:
+        board = _late_board1798(pcb_data, output_file, return_results,
+                                results_data, write_model)
+        if board is None:
             return {}
         ids = {nid for nid, n in board.nets.items() if n.name in names}
         return _skew_by_name(skew_group_snapshot(board, skew_path, ids))
@@ -2630,9 +2629,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the persisted .kicad_pro record; > 0 activates (and is
                 # persisted for later chain steps); 0 / -1 explicitly OFF.
                 same_net_pad_clearance: Optional[float] = None,
-                # #1896: at most this many pads on one plane tap via of the
-                # finalize (repair_planes); None: no limit
-                tap_via_share: Optional[int] = None,
                 # #1842: (top layer, bottom layer) of the vias this step lays,
                 # and `via_span_type` to override the type read off the span
                 # (via_span.resolve_via_span). None -> through vias.
@@ -3124,63 +3120,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layers = DEFAULT_4_LAYER_STACK
     # #1842: a via span is the step's sub-stack -- it routes on those layers
     # only, and every via it lays joins exactly that run
-    _span1842 = _span_type1842 = None
-    if via_span:
-        from via_span import resolve_via_span
-        _span1842, _span_type1842 = resolve_via_span(
-            list(getattr(pcb_data.board_info, 'copper_layers', None) or []),
-            via_span[0], via_span[-1], via_span_type)
-        if _span_type1842 is None:
-            _span1842 = None                      # the whole stack: through vias
-        else:
-            # a file older than KiCad 10's format has no `buried` word
-            from via_span import file_via_type
-            _word1842 = file_via_type(_span_type1842,
-                                      getattr(pcb_data, 'kicad_version', 0) or 0)
-            if _word1842 != _span_type1842:
-                print(f"Via span (#1842): this board's file format "
-                      f"({pcb_data.kicad_version}) predates KiCad 10, which has no "
-                      f"'{_span_type1842}' via; its vias are written '{_word1842}' "
-                      f"(KiCad 9's blind/buried type), on the same layer pair")
-                _span_type1842 = _word1842
-            _in_span = [l for l in layers if l in _span1842]
-            if layer_costs and len(layer_costs) == len(layers):
-                layer_costs = [c for l, c in zip(layers, layer_costs) if l in _span1842]
-                if not _in_span:
-                    layer_costs = None
-            layers = _in_span or list(_span1842)
-            print(f"Via span (#1842): {_span_type1842} vias {_span1842[0]}-{_span1842[-1]}; "
-                  f"routing on {', '.join(layers)} only, and only copper on "
-                  f"{', '.join(_span1842)} (and drilled pads) blocks a via site")
-            # copper the step could not lay again stays where it is
-            from via_span import hold_outside_copper as _hold1842
-            _held1842 = _hold1842(pcb_data, _span1842)
-            if _held1842:
-                print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
-                      f"span are held in place for this step")
-            if _span_type1842 == 'micro' and via_from_class:
-                # no via size was asked for: a micro via span draws the
-                # Default class's MICRO via on every net (a class's
-                # via_diameter is its through via's), on both fronts
-                from via_span import default_micro_via
-                _mdia, _mdrill = default_micro_via(
-                    input_file or getattr(pcb_data, 'source_path', '') or '')
-                if _mdia:
-                    via_size = _mdia
-                if _mdrill:
-                    via_drill = _mdrill
-                if _mdia or _mdrill:
-                    print(f"  micro via span: drawing the board Default net-class micro "
-                          f"via {via_size}/{via_drill} mm on every net")
-                via_from_class = False
-            if disable_bga_zones is None:
-                # "no new via in a BGA's pad field" is a rule for through
-                # vias, which the fan-out step lays there. A via of a span
-                # between the balls, or under them on layers the part has no
-                # copper on, is how a dense part escapes.
-                disable_bga_zones = []
-                print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
-                      f"fields (--no-bga-zones)")
+    from via_span import step_span as _step_span1842
+    _span1842, _span_type1842, layers, layer_costs = _step_span1842(
+        pcb_data, layers, layer_costs, via_span, via_span_type)
+    if _span1842:
+        # copper the step could not lay again stays where it is
+        from via_span import hold_outside_copper as _hold1842
+        _held1842 = _hold1842(pcb_data, _span1842)
+        if _held1842:
+            print(f"  {_held1842} existing track(s) and via(s) with copper outside the "
+                  f"span are held in place for this step")
+        from via_span import laser_drilled as _laser1842
+        if via_from_class and _laser1842(pcb_data.board_info.copper_layers,
+                                         _span1842, _span_type1842):
+            # no via size was asked for: a micro via span draws the
+            # Default class's MICRO via on every net (a class's
+            # via_diameter is its through via's), on both fronts
+            from via_span import default_micro_via
+            _mdia, _mdrill = default_micro_via(
+                input_file or getattr(pcb_data, 'source_path', '') or '')
+            if _mdia:
+                via_size = _mdia
+            if _mdrill:
+                via_drill = _mdrill
+            if _mdia or _mdrill:
+                print(f"  micro via span: drawing the board Default net-class micro "
+                      f"via {via_size}/{via_drill} mm on every net")
+            via_from_class = False
+        if disable_bga_zones is None:
+            # "no new via in a BGA's pad field" is a rule for through
+            # vias, which the fan-out step lays there. A via of a span
+            # between the balls, or under them on layers the part has no
+            # copper on, is how a dense part escapes.
+            disable_bga_zones = []
+            print(f"  {_span_type1842} via span: vias are allowed inside BGA pad "
+                  f"fields (--no-bga-zones)")
     print(f"Using {len(layers)} routing layers: {layers}")
 
     # One cost per requested layer, or the full-stack append below puts its
@@ -4827,6 +4801,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # free, the GUI's were priced on the input fill.
         from plane_fragility import carve_in_memory_copper
         carve_in_memory_copper(config, pcb_data)
+    # #595: a soft cost over gaps in the adjacent reference plane, for the
+    # nets with an impedance declaration (KICAD_REFERENCE_VOID_COST, off at 0)
+    from reference_void import register_reference_void
+    register_reference_void(pcb_data, config, track_proximity_cache)
 
     # Congestion v2 (#424): demand/capacity bins + owner terminals; per-net
     # stamping happens at prepare (routing_context.stamp_congestion2).
@@ -6762,14 +6740,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _dr.update(disclose_step_rules(_rules, pcb_data, results, input_file))
         # #1491: the class/type-scoped rules this call honoured, and each
         # relaxing one another routed net held at its class value
-        if getattr(config, 'via_budgets', None):
-            # #865: the nets a via_count rule gives a max, and those over it
-            from via_budget import report as _vb_report
-            _over865 = _vb_report(config, pcb_data)
-            _dr['via_count'] = {'nets': len(config.via_budgets), 'over': _over865}
-            for _row in _over865:
-                print(f"  via_count: {_row['net']} has {_row['vias']} via(s), over its "
-                      f"max {_row['max']} ({_row['rule']}); no route inside it was found")
         _sc = getattr(config, 'scoped_clearance', None)
         if _sc is not None:
             from kicad_dru import scoped_clearance_report
@@ -6791,6 +6761,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _pfg = getattr(config, '_plane_fragility_geometry', None)
     if _pfg is not None:
         summary['plane_fragility'] = dict(_pfg)
+    # #595: the reference-void field, when the run armed it
+    _rv595 = getattr(config, '_reference_void', None)
+    if _rv595 and _rv595.get('cost_mm'):
+        summary['reference_void'] = dict(_rv595)
     if _pour_guard_report is not None:
         # #1260: which out-of-scope pours were blocked as obstacles and which
         # were left crossable, and from what geometry. Absent when the run had
@@ -7421,9 +7395,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _sense = _sense_entries(pcb_data)
     if _sense:
         summary['sense_branches'] = _sense
-    # #1842: the step's via span, and that its plane finalize taps with vias
-    # of the span, with how many pours lie outside it -- a key, so a chain
-    # reader need not grep the console line
+    # #1842: the step's via span, whether its plane finalize ran (its taps
+    # are vias of the span) and how many pours lie outside the span -- a key,
+    # so a chain reader need not grep the console line. Printed before the
+    # finalize: the finalize updates it in `summary` (by reference)
     _span_summary1842 = via_span_summary(config, pcb_data)
     if _span_summary1842:
         summary['via_span'] = _span_summary1842
@@ -7829,13 +7804,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
         except Exception as _e9c:
             print(f"  (pre-finalize checkpoint failed: {_e9c})")
-    # #1896: how the finalize's pad taps share vias, for the merged summary.
-    # Cleared here so a step whose finalize does not run reports none.
-    try:
-        import repair_planes as _rp1896
-        _rp1896.LAST_TAP_VIAS = None
-    except Exception:                                           # noqa: BLE001
-        _rp1896 = None
+    # #1896: the zone nets this step's plane finalize served, whose pads the
+    # end of the run counts per tap via on the board it ships (None: no
+    # finalize ran).
+    _tap_nets1896 = None
     if (final_reconcile and (not skip_routing or _fin_only)
             and not _ckpt_stop and not quick
             and (output_file or return_results)
@@ -7899,6 +7871,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # reference, so `--json-out`, the returned dict and the
                     # JSON_SUMMARY_MIN line (printed last) do.
                     summary['finalize_excluded_nets'] = _excluded9
+            _tap_nets1896 = sorted({n for n, _l in _zpairs})
             # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
             # cleanup): run them only for zone nets the fill-aware checker
             # says are incomplete on THIS run's board (pcb_data == file
@@ -7918,6 +7891,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           f"tapped by this step: {', '.join(_off1842[:6])}"
                           f"{' ...' if len(_off1842) > 6 else ''}")
                 _zpairs = [(n, l) for n, l in _zpairs if l in config.via_span]
+            if config.via_span and _zpairs:
+                # #1842: the finalize taps the span's pours on this step: say
+                # so in the summary (by reference, as finalize_excluded_nets
+                # above). With no pour on the span it has nothing to tap.
+                from via_span import PLANE_FINALIZE_ATTR as _pfa1842
+                setattr(config, _pfa1842, 'run')
+                if isinstance(summary.get('via_span'), dict):
+                    summary['via_span'] = via_span_summary(config, pcb_data)
             _zpairs_all = list(_zpairs)
             _ship_scope678 = sorted({n for n, _l in _zpairs_all})
             if _zpairs:
@@ -8046,8 +8027,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # custody-restores casualties; KICAD_FINALIZE_RIP=0
                         # reverts for A/B.
                         rip_blocker_nets=_finalize_rip9,
-                        # #1896: the opt-in limit on pads per tap via
-                        tap_via_share=tap_via_share,
                         # #1621: never a net this step's --nets negates
                         hands_off_nets=sorted(_hands_off9(pcb_data)),
                         power_nets=power_nets,
@@ -8140,8 +8119,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             if config.same_net_pad_clearance > 0 else None),
                         # Same rip-authority restoration as the GUI leg above.
                         rip_blocker_nets=_finalize_rip9,
-                        # #1896: the opt-in limit on pads per tap via
-                        tap_via_share=tap_via_share,
                         # #1621: the board below may be a fresh parse, which
                         # carries no stash -- hand the set over explicitly
                         hands_off_nets=sorted(_hands_off9(pcb_data)),
@@ -10024,20 +10001,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _rae:                               # noqa: BLE001
             print(f"  WARNING: rule-area keep-out audit skipped "
                   f"({type(_rae).__name__}: {_rae})")
-    # the --json-out document carries both shipped readings; a reader of the
-    # log alone takes them from this line
-    _shipped_audit = {k: v for k, v in (('net_keepouts', _nk_shipped),
-                                        ('rule_area_keepouts', _ra_shipped))
-                      if v is not None}
-    if _shipped_audit:
-        print('JSON_SHIPPED_AUDIT: ' + json.dumps(_shipped_audit))
 
     # #1680/#1681: copper on or inside the clearance of another net's pad, on
     # the board this run ships: a short whose net was outside this step or
     # could not be ripped, a part the clearance step could not clear, or what a
     # pass laid after the rip. Measured at the floor the writeback stores.
     # Report-only; keys absent when there is none.
-    _pad_contacts_left = _pad_grazes_left = None
+    _pad_contacts_left = _pad_grazes_left = _shipped_pcl = None
     if final_reconcile and not _ckpt_stop:
         from pad_contact import audit_shipped
         _rd_pcl = locals().get('results_data')
@@ -10052,9 +10022,44 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _rd_pcl['pad_grazes'] = _pad_grazes_left
         elif output_file and os.path.isfile(output_file):
             from kicad_parser import parse_kicad_pcb as _pk_pcl
+            _shipped_pcl = _pk_pcl(output_file)
             _pad_contacts_left, _pad_grazes_left = audit_shipped(
-                _pk_pcl(output_file), clearance=_pcl_floor,
+                _shipped_pcl, clearance=_pcl_floor,
                 area=getattr(config, 'area_clearance', None))
+
+    # #1896: how many plane-net pads each tap via serves, on the board this
+    # run ships -- every via a pad of a net the plane finalize served reaches
+    # through surface copper (the fan-out's dogbones, the finalize's taps,
+    # straps and joins, the oracle's reconnect), the same reading on both
+    # fronts. Report-only.
+    _tap_vias1896 = None
+    if final_reconcile and not _ckpt_stop and _tap_nets1896:
+        try:
+            from tap_via_census import tap_via_census, tap_via_line
+            _rd_tv = locals().get('results_data')
+            if return_results and _rd_tv is not None:
+                _tv_s, _tv_v = _gui_write_model(_rd_tv)
+                _tap_vias1896 = tap_via_census(
+                    pcb_data, _tap_nets1896,
+                    [s for _l in _tv_s.values() for s in _l],
+                    [v for _l in _tv_v.values() for v in _l])
+                _rd_tv['tap_vias'] = _tap_vias1896
+            elif _shipped_pcl is not None:
+                _tap_vias1896 = tap_via_census(_shipped_pcl, _tap_nets1896)
+            _tvl1896 = tap_via_line(_tap_vias1896)
+            if _tvl1896:
+                print(f"  {_tvl1896}")
+        except Exception as _tve:                               # noqa: BLE001
+            print(f"  (tap-via census skipped: {type(_tve).__name__}: {_tve})")
+
+    # the --json-out document carries these shipped readings; a reader of the
+    # log alone takes them from this line
+    _shipped_audit = {k: v for k, v in (('net_keepouts', _nk_shipped),
+                                        ('rule_area_keepouts', _ra_shipped),
+                                        ('tap_vias', _tap_vias1896))
+                      if v is not None}
+    if _shipped_audit:
+        print('JSON_SHIPPED_AUDIT: ' + json.dumps(_shipped_audit))
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
@@ -10070,10 +10075,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # predates the finalize, so it cannot carry this.
             if _merged is not None and _via_in_pad962 is not None:
                 _merged['via_in_pad'] = _via_in_pad962
-            # #1896: the plane finalize's tap vias and how they are shared
-            if (_merged is not None and _rp1896 is not None
-                    and (_rp1896.LAST_TAP_VIAS or {}).get('vias')):
-                _merged['tap_vias'] = _rp1896.LAST_TAP_VIAS
+            # #1896: likewise the tap vias of the shipped board
+            if _merged is not None and _tap_vias1896 is not None:
+                _merged['tap_vias'] = _tap_vias1896
             # #1798: likewise the skew rows, read on the shipped board.
             if _merged is not None and _late_skew1798 is not None:
                 if _late_skew1798:
@@ -10973,8 +10977,6 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--board-edge-clearance", type=float, default=None,
                         help="Clearance from board edge in mm. Default: the board's own "
                              f"min_copper_edge_clearance constraint, else {defaults.BOARD_EDGE_CLEARANCE}.")
-    parser.add_argument("--tap-via-share", type=int, default=None, metavar="N",
-                        help="The plane finalize's taps: At most N pads on one plane tap via (#1896): a pad whose tap would reuse a neighbour's via that already serves N pads gets a via of its own where a legal site exists, else keeps the shared tap and is named. 1 = a via per pad. Default: no limit.")
     parser.add_argument("--same-net-pad-clearance", type=float, default=None,
                         help="Edge-to-edge clearance (mm) between EVERY placed via and "
                              "same-net pads (#581). > 0 keeps vias off same-net SMD pads "
@@ -11621,7 +11623,6 @@ For differential pair routing, use route_diff.py:
                 hole_to_hole_clearance=args.hole_to_hole_clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 same_net_pad_clearance=args.same_net_pad_clearance,
-                tap_via_share=args.tap_via_share,
                 via_span=args.via_span, via_span_type=args.via_span_type,
                 via_span_escape=args.via_span_escape,
                 vertical_attraction_radius=args.vertical_attraction_radius,

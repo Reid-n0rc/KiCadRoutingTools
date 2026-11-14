@@ -300,6 +300,13 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
     track_rules: List[TrackRule] = []
     notes: List[str] = []
     skipped: List[Tuple[str, float, Optional[str]]] = []
+    _coupled_memo: List[frozenset] = []
+
+    def _coupled_orders() -> frozenset:
+        # parsed once, and only for a file with a rule that reaches the test
+        if not _coupled_memo:
+            _coupled_memo.append(_coupled_graded_orders(text))
+        return _coupled_memo[0]
     for order, node in enumerate(_parse_nodes(_tokenize(text))):
         if not isinstance(node, list) or not node or node[0] != "rule":
             continue
@@ -365,7 +372,7 @@ def _parse_dru_full(text: str, copper_layers: List[str]):
                 # #1843: read by position (area_clearance, design_rules.AreaIndex)
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm scoped by "
                              f"a rule area -- handled by position (#1843)")
-            elif _condition_is_coupled(condition):
+            elif order in _coupled_orders():
                 # #1293: read, but not here -- it binds a pair's P against
                 # its own N, which the pair step and check_drc resolve
                 notes.append(f"rule '{name}': clearance {clearance_mm}mm between a "
@@ -1217,14 +1224,18 @@ def strip_keep_apart(node):
     return node
 
 
-def _condition_is_coupled(src) -> bool:
-    """Does a condition AND in `AB.isCoupledDiffPair()` (the #1293 shape, a
-    rule binding a diff pair's P against its own N)?"""
+def _coupled_graded_orders(text: str) -> frozenset:
+    """The file positions of the rules check_drc's coupled-pair channel
+    grades (#1293): parsed as `design_rules.parse_dru` parses them, and kept
+    by check_drc's own test, `r.coupled and not r.unsupported` -- so a rule
+    with a (severity exclusion) or a non-copper (layer ...) clause is not
+    one, whatever its condition says."""
     try:
-        from design_rules import parse_condition, _coupled_terms
-        return _coupled_terms(parse_condition(str(src))) == (True, False)
+        from design_rules import parse_dru
+        return frozenset(r.order for r in parse_dru(text)[0]
+                         if r.coupled and not r.unsupported)
     except Exception:                                            # noqa: BLE001
-        return False
+        return frozenset()
 
 
 def _condition_is_scoped(src: str) -> bool:
@@ -1566,6 +1577,10 @@ def apply_layer_rules(value: float, layer_map: Dict[str, float], *,
     return value
 
 
+#: the layer map of a config with no layer rule: ONE object, never mutated,
+#: so a memo keyed on a layer map's identity hits on such a board as well
+_NO_LAYER_RULES: Dict[str, float] = {}
+
 #: the item types a routed net lays (tracks and vias), and the obstacle types
 #: a track / via stamp stands for
 _ROUTED_TYPES = ('track', 'via')
@@ -1674,7 +1689,7 @@ class ScopedClearanceInstall:
             return None
         clr = config.clearance
         nc = config.net_clearances or {}
-        lmap = config.layer_clearances or {}
+        lmap = config.layer_clearances or _NO_LAYER_RULES
         key = (self.sc._sig(net_id), pad_type, layer, id(lmap), clr,
                nc.get(int(net_id or 0)))
         hit = self._layered_memo.get(key)
