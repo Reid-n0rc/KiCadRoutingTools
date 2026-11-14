@@ -334,6 +334,7 @@ otherwise invisible in flag tables:
 | Field | Env knob | Default | What it prices |
 |-------|----------|---------|----------------|
 | Plane fragility | `KICAD_PLANE_FRAGILITY_COST` | **2.0 = ON** | Cells near pour boundaries/necks, so signals do not bisect a plane. The LARGEST default field (10x the stub tier). `0` reverts. Which copper it was rasterized from is disclosed in `JSON_SUMMARY.plane_fragility` (below). |
+| Width-aware stub field (#593) | `KICAD_STUB_WIDTH_AWARE` | off | An UNROUTED net assigned a track at least `KICAD_STUB_WIDTH_RATIO` (2) times the run's width repels other nets from its stub ends and chip pads over a radius grown by half its width, at the stub cost times (width / run width) ** `KICAD_STUB_WIDTH_EXP` (0.5), capped at 3x: a thin signal routed first leaves a wide net the room a wide track needs. The plain stub field is unchanged for every other net, and retires with the net as before. Opt-in pending a corpus A/B. |
 | Congestion v1 | `KICAD_CONGESTION_COST` | 0 = off | All-layer copper-density field. |
 | Congestion v2 | `KICAD_CONGESTION2_COST` | 0 = off | Demand/capacity bins, owner-exempt (your own destination does not repel you). A source in the layer-map composition pass since d52f1c2 (#585 item 7): sums in sum mode, max-mode unchanged by commutativity. |
 | History congestion | `KICAD_HISTORY_COST` | **0.1 = ON** | PathFinder-style negotiated congestion (#590): per-CELL, CUMULATIVE conflict history for the rest of the call. On by default since 2026-08-13; `0` turns it off. See below. |

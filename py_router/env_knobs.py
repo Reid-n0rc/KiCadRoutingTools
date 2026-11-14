@@ -168,6 +168,15 @@ def refresh() -> None:
     g['PSEUDO_STUB_RETIRE'] = _on_default('KICAD_PSEUDO_STUB_RETIRE')
     g['STUB_LAYER_AWARE'] = _opt_in('KICAD_STUB_LAYER_AWARE')
     g['STUB_LAYER_M'] = _f('KICAD_STUB_LAYER_M', 0.0)  # 0 = auto n_layers/2
+    # #593: width-aware stub fields. An UNROUTED net assigned a track at least
+    # KICAD_STUB_WIDTH_RATIO times the run's width (default 2) repels other
+    # nets from its stub ends and chip pads over a radius grown by half its
+    # width, at a cost scaled by (width / run width) ** KICAD_STUB_WIDTH_EXP
+    # (default 0.5, capped at 3x): "someone must leave here, and they are
+    # wider than you". Opt-in until a corpus A/B.
+    g['STUB_WIDTH_AWARE'] = _opt_in('KICAD_STUB_WIDTH_AWARE')
+    g['STUB_WIDTH_RATIO'] = _f('KICAD_STUB_WIDTH_RATIO', 2.0)
+    g['STUB_WIDTH_EXP'] = _f('KICAD_STUB_WIDTH_EXP', 0.5)
     # (#585 item 2 -- excluding plane-destined nets' stubs -- was DECIDED
     # AS-IS, no knob: a pour needs reserved access space exactly like tracks.)
     # #585 item 4: per-package proximity fields (BGA/QFN/QFP, radius scaled
