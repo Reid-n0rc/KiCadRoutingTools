@@ -270,6 +270,16 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
     surplus: Dict = {}
     # #593: the nets wider than the run, whose field is wider and dearer
     wide = wide_stub_nets(config, stub_net_ids) if full_cost > 0 else {}
+    if wide and not getattr(config, '_stub_width_said', False):
+        # once per run: which nets the opt-in field widens
+        config._stub_width_said = True
+        _names = sorted(getattr(pcb_data.nets.get(n), 'name', None) or str(n)
+                        for n in wide) if pcb_data is not None else sorted(map(str, wide))
+        print(f"Width-aware stub field (#593, KICAD_STUB_WIDTH_AWARE): "
+              f"{len(wide)} unrouted net(s) at least "
+              f"{max(1.0, env_knobs.STUB_WIDTH_RATIO):g}x the run's width repel over "
+              f"a wider radius: {', '.join(_names[:8])}"
+              + (', ...' if len(_names) > 8 else ''))
 
     def _wide_points(nid):
         from connectivity import get_stub_endpoints
