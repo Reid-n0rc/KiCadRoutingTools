@@ -200,6 +200,31 @@ def _stub_surplus_arrays(points_by_key, radius_grid: int, surplus_cost: int,
     return out
 
 
+#: #593: the most a wide net's stub field is scaled above the stub cost.
+STUB_WIDTH_COST_CAP = 3.0
+
+
+def wide_stub_nets(config: GridRouteConfig, stub_net_ids) -> Dict[int, Tuple[float, float]]:
+    """#593: {net_id: (extra radius mm, cost scale)} for the unrouted nets
+    whose assigned track is at least KICAD_STUB_WIDTH_RATIO times the run's
+    width: half the net's widest track, and (width / run width) **
+    KICAD_STUB_WIDTH_EXP capped at `STUB_WIDTH_COST_CAP`. Empty unless
+    KICAD_STUB_WIDTH_AWARE is set."""
+    if not env_knobs.STUB_WIDTH_AWARE:
+        return {}
+    base = float(config.track_width or 0.0)
+    if base <= 0:
+        return {}
+    ratio = max(1.0, env_knobs.STUB_WIDTH_RATIO)
+    exp = max(0.0, env_knobs.STUB_WIDTH_EXP)
+    out = {}
+    for nid in stub_net_ids or ():
+        w = max(config.get_net_track_width(nid, layer) for layer in config.layers)
+        if w >= ratio * base - 1e-9:
+            out[nid] = (w / 2.0, min(STUB_WIDTH_COST_CAP, (w / base) ** exp))
+    return out
+
+
 def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
                          stub_net_ids: List[int],
                          all_stubs: List[Tuple[float, float]],
@@ -243,8 +268,43 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
     base_cost = int(full_cost / m)
     surplus_cost = full_cost - base_cost
     surplus: Dict = {}
+    # #593: the nets wider than the run, whose field is wider and dearer
+    wide = wide_stub_nets(config, stub_net_ids) if full_cost > 0 else {}
+    if wide and not getattr(config, '_stub_width_said', False):
+        # once per run: which nets the opt-in field widens
+        config._stub_width_said = True
+        _names = sorted(getattr(pcb_data.nets.get(n), 'name', None) or str(n)
+                        for n in wide) if pcb_data is not None else sorted(map(str, wide))
+        print(f"Width-aware stub field (#593, KICAD_STUB_WIDTH_AWARE): "
+              f"{len(wide)} unrouted net(s) at least "
+              f"{max(1.0, env_knobs.STUB_WIDTH_RATIO):g}x the run's width repel over "
+              f"a wider radius: {', '.join(_names[:8])}"
+              + (', ...' if len(_names) > 8 else ''))
+
+    def _wide_points(nid):
+        from connectivity import get_stub_endpoints
+        from net_queries import get_chip_pad_positions
+        return (get_stub_endpoints(pcb_data, [nid])
+                + get_chip_pad_positions(pcb_data, [nid]))
+
+    def _wide_stamp(nid, cost):
+        """(grid radius, cost) of a wide net's stamp from the cost a plain
+        net's would have."""
+        extra, scale = wide[nid]
+        return (coord.to_grid_dist(config.stub_proximity_radius + extra),
+                int(cost * scale))
 
     if not env_knobs.PROXIMITY_SUM:
+        if all_stubs and wide and stub_radius_grid > 0:
+            # one more max-insert per wide net, over its own points: the map's
+            # write keeps the larger cost per cell, so the plain stamp below
+            # stands wherever it is the higher of the two
+            for nid in sorted(wide):
+                pts = _wide_points(nid)
+                r_g, c_g = _wide_stamp(nid, base_cost if m > 1.0 else full_cost)
+                if pts and c_g > 0 and r_g > 0:
+                    obstacles.add_stub_proximity_costs_batch(
+                        [coord.to_grid(p[0], p[1]) for p in pts], r_g, c_g)
         if all_stubs:
             if m > 1.0:
                 grid_pts = [coord.to_grid(p[0], p[1]) for p in all_stubs]
@@ -311,8 +371,10 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
                    + get_chip_pad_positions(pcb_data, [nid]))
             if pts:
                 pts_by_net[nid] = pts
+                r_g, c_g = (_wide_stamp(nid, src_cost) if nid in wide
+                            else (stub_radius_grid, src_cost))     # #593
                 groups.append(([coord.to_grid(p[0], p[1]) for p in pts],
-                               stub_radius_grid, src_cost))
+                               r_g, c_g))
     if m > 1.0 and layer_map and pts_by_net:
         surplus = _stub_surplus_arrays(pts_by_net, stub_radius_grid,
                                        surplus_cost, coord, layer_map)
