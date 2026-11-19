@@ -4473,6 +4473,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     or any(net_pattern_matches(_pe_net.name, _p) for _p in _pe_exc)):
                 continue
             _pe_auto.append(_nid)
+        # Only a FINISHED route (or pad-less copper) is a candidate. Custody
+        # reroutes a victim or restores it, and the copper of a net whose
+        # pads it does not join -- a fanout stub and via to its own ball, a
+        # part-routed net -- can be neither rerouted to what it was nor
+        # restored cheaply: ripping it puts a net the run was not asked to
+        # route in front of every rescue ladder, which then tries to finish
+        # it. --rip-existing-nets naming it is still the override.
+        if _pe_auto:
+            from check_connected import (check_net_connectivity as _pe_cnc,
+                                         net_break_within_outlines as _pe_nbo)
+            _pe_segs: Dict[int, list] = {}
+            for _s in pcb_data.segments:
+                _pe_segs.setdefault(_s.net_id, []).append(_s)
+            _pe_vias: Dict[int, list] = {}
+            for _v in pcb_data.vias:
+                _pe_vias.setdefault(_v.net_id, []).append(_v)
+            _pe_open = []
+            for _nid in _pe_auto:
+                _pads = pcb_data.pads_by_net.get(_nid, [])
+                if not _pads:
+                    continue        # nothing to finish: art, a wall, debris
+                if len(_pads) < 2 or _pe_nbo(pcb_data, _pe_cnc(
+                        _nid, _pe_segs.get(_nid, []), _pe_vias.get(_nid, []),
+                        _pads, [], tolerance=0.02, pcb_data=pcb_data))[0]:
+                    _pe_open.append(_nid)
+            if _pe_open:
+                _pe_open_set = set(_pe_open)
+                _pe_auto = [n for n in _pe_auto if n not in _pe_open_set]
+                _pe_names = sorted(pcb_data.nets[n].name for n in _pe_open)
+                print(f"{len(_pe_open)} pre-existing net(s) left out of rip candidacy: "
+                      f"their copper is not a finished route (a fanout stub, or a "
+                      f"net with an open pad), so a rip could only be repaid by "
+                      f"routing a net this run was not asked to "
+                      f"({', '.join(_pe_names[:4])}{', ...' if len(_pe_names) > 4 else ''}"
+                      f"; --rip-existing-nets naming one allows it)")
         if _pe_auto:
             from protected_nets import (protection_map, filter_rippable_names,
                                         rip_override_names)

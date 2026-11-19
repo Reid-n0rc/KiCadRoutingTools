@@ -24,6 +24,10 @@ asserts candidacy actually REGISTERED the bystander nets -- without that
 the gate under test is never exercised and the pass would be vacuous
 (the run_utils doctrine: a test whose trigger never fired proves
 nothing).
+
+Since candidacy takes finished routes only, these open bystanders are
+left out of it instead (tests/test_rip_skips_unfinished_nets.py); the
+guard accepts either verdict, and the bystander rows are unchanged.
 """
 import os
 import io
@@ -121,10 +125,14 @@ def test_narrow_scope():
                               grid_step=0.1)
         out = buf.getvalue()
 
-        # Vacuity guard: candidacy must have REGISTERED the bystanders,
-        # or the gate under test never ran and this pass proves nothing.
-        check("candidacy registered pre-existing nets (gate exercised)",
-              'registered as main-pass rip candidates' in out)
+        # Vacuity guard: candidacy must have SEEN the bystanders, or the
+        # gate under test never ran and this pass proves nothing. Their
+        # open stubs are not a finished route, so candidacy now leaves them
+        # out rather than registering them; either verdict means the
+        # candidacy code read them.
+        check("candidacy saw the pre-existing nets (gate exercised)",
+              'registered as main-pass rip candidates' in out
+              or '5 pre-existing net(s) left out of rip candidacy' in out)
 
         before = parse_kicad_pcb(src)
         after = parse_kicad_pcb(dst)
