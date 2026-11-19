@@ -204,6 +204,25 @@ def _stub_subset(pcb_data: PCBData, net_id: int, segments, vias,
     return stub_segs, stub_vias
 
 
+def via_escape_subset(pcb_data: PCBData, net_id: int, segments, vias):
+    """The fanout escape a rip of a PRE-EXISTING net leaves on the board:
+    each pad stub (the `_stub_subset` reading) that ends in a via, that via,
+    and a via in a pad. A stub that ends in no via is not one: it is the
+    first piece of a route, ripped with the rest.
+
+    Ripping the escape freed its via site for the net that ripped it, and a
+    victim that could not be rerouted then lost that via for good: the
+    terminal restore keeps only escape pieces that clear the new copper."""
+    stub_segs, stub_vias = _stub_subset(pcb_data, net_id, segments, vias)
+    if not stub_vias:
+        return [], []
+    via_pts = {(round(v.x, 3), round(v.y, 3)) for v in stub_vias}
+    segs = [s for s in stub_segs
+            if (round(s.start_x, 3), round(s.start_y, 3)) in via_pts
+            or (round(s.end_x, 3), round(s.end_y, 3)) in via_pts]
+    return segs, list(stub_vias)
+
+
 def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
                          net_id: int, working_obstacles=None,
                          net_obstacles_cache=None) -> Optional[str]:

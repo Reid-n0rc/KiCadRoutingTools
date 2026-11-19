@@ -4916,6 +4916,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         for _v in pcb_data.vias:
             if _v.net_id in _reg_set and not _immutable_reg(_v):
                 _reg_vias.setdefault(_v.net_id, []).append(_v)
+        # A rip takes the net's route, not its fanout escape (a pad stub to
+        # a via, a via in a pad): ripped, the escape's via site was free for
+        # the ripper, and a victim not rerouted lost the via for good.
+        from rip_restore import via_escape_subset as _esc_reg
+        for _nid in sorted(_reg_set):
+            _es, _ev = _esc_reg(pcb_data, _nid, _reg_segs.get(_nid, []),
+                                _reg_vias.get(_nid, []))
+            if _es or _ev:
+                _drop = {id(o) for o in _es} | {id(o) for o in _ev}
+                _reg_segs[_nid] = [s for s in _reg_segs.get(_nid, [])
+                                   if id(s) not in _drop]
+                _reg_vias[_nid] = [v for v in _reg_vias.get(_nid, [])
+                                   if id(v) not in _drop]
     # #734: remember WHICH nets are mere rip candidates -- the audit gate
     # below must not depend on the is_existing_route flag surviving in
     # routed_results (later passes replace result dicts), so it keys on
