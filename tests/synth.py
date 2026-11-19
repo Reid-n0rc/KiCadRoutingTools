@@ -271,3 +271,78 @@ def with_partner_pads(src, dst, origin, *, cols=1, pitch=1.0):
     with open(dst, 'w', encoding='utf-8') as fh:
         fh.write(text)
     return names
+
+
+def dogbone_bga_board(ball, net='/D0', *, pitch=1.0, n=5, paired=False,
+                      finished=()):
+    """Two n x n BGAs (U1, U2), every ball dog-boned -- an F.Cu stub to a
+    through via half a pitch off the ball, diagonally -- on a 4-layer board,
+    as .kicad_pcb TEXT. `ball` (row, col) carries `net` on both parts. With
+    `paired`, every other ball's net joins the same ball of the other part
+    (an unrouted bus: two fanout stubs each); without, each has a one-pad
+    net of its own. `finished` names (row, col) balls whose paired net is
+    also routed, an In2.Cu track joining its two vias. Uuids are
+    deterministic (`bga-NNNN`)."""
+    nets = ['', net]
+    items = []
+    uid = [0]
+    vias = {}
+
+    def u():
+        uid[0] += 1
+        return 'bga-%04d' % uid[0]
+
+    off = pitch / 2
+    for ref, cx in (('U1', 10.0), ('U2', 26.0)):
+        cy = 12.0
+        pads = []
+        for r in range(n):
+            for c in range(n):
+                if (r, c) == ball:
+                    name = net
+                else:
+                    name = f'/B{r}{c}' if paired else f'/{ref}_{r}{c}'
+                if name not in nets:
+                    nets.append(name)
+                k = nets.index(name)
+                lx, ly = (c - n // 2) * pitch, (r - n // 2) * pitch
+                pads.append('    (pad "%s%d" smd circle (at %s %s) (size 0.4 0.4) '
+                            '(layers "F.Cu" "F.Mask") (net %d "%s") (uuid "%s"))'
+                            % ('ABCDEFGH'[r], c + 1, lx, ly, k, name, u()))
+                bx, by = cx + lx, cy + ly
+                vx, vy = round(bx + off, 4), round(by + off, 4)
+                vias.setdefault((r, c), []).append((vx, vy, k))
+                items.append('  (segment (start %s %s) (end %s %s) (width 0.15) '
+                             '(layer "F.Cu") (net %d) (uuid "%s"))'
+                             % (bx, by, vx, vy, k, u()))
+                items.append('  (via (at %s %s) (size 0.45) (drill 0.2) '
+                             '(layers "F.Cu" "B.Cu") (net %d) (uuid "%s"))'
+                             % (vx, vy, k, u()))
+        items.insert(0, '  (footprint "synth:BGA-%d_%dx%d_P%smm" (layer "F.Cu") '
+                        '(uuid "%s") (at %s %s)\n'
+                        '    (property "Reference" "%s" (at 0 -4 0) (layer "F.SilkS") '
+                        '(uuid "%s")\n      (effects (font (size 0.5 0.5) '
+                        '(thickness 0.1))))\n%s\n  )'
+                     % (n * n, n, n, pitch, u(), cx, cy, ref, u(), '\n'.join(pads)))
+    for rc in finished:
+        (ax, ay, k), (bx, by, _) = vias[rc]
+        # out of the field and back in on In2.Cu, below every other row
+        ys = 12.0 + (n // 2 + 1.5) * pitch + 0.5 * (len(finished) and
+                                                     list(finished).index(rc))
+        for (x1, y1, x2, y2) in ((ax, ay, ax, ys), (ax, ys, bx, ys), (bx, ys, bx, by)):
+            items.append('  (segment (start %s %s) (end %s %s) (width 0.15) '
+                         '(layer "In2.Cu") (net %d) (uuid "%s"))'
+                         % (x1, y1, x2, y2, k, u()))
+    out = ['(kicad_pcb (version 20241229) (generator "synth") '
+           '(generator_version "9.0")\n'
+           '  (general (thickness 1.6) (legacy_teardrops no))\n'
+           '  (paper "A4")\n'
+           '  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) '
+           '(31 "B.Cu" signal) (37 "F.SilkS" user) (39 "F.Mask" user) '
+           '(38 "B.Mask" user) (44 "Edge.Cuts" user))\n'
+           '  (setup (pad_to_mask_clearance 0))']
+    out += ['  (net %d "%s")' % (i, nm) for i, nm in enumerate(nets)]
+    out += items
+    out.append('  (gr_rect (start 0 0) (end 36 24) (layer "Edge.Cuts") '
+               '(stroke (width 0.1) (type solid)) (fill none) (uuid "bga-edge"))')
+    return '\n'.join(out) + '\n)\n'

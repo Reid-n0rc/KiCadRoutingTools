@@ -46,6 +46,11 @@ except ImportError:
     GridObstacleMap = None
     GridRouter = None
 
+#: How many cells around each terminal a route may cross a BGA exclusion zone
+#: (the allowed-cell window). setup_bga_exclusion_zones reads it too: copper
+#: that ends deeper inside a zone than this cannot leave it.
+ENDPOINT_ALLOW_RADIUS_CELLS = 10
+
 def _unblock_debug() -> bool:
     """KICAD_UNBLOCK_DEBUG, from the read-once env_knobs cache.
 
@@ -3164,7 +3169,7 @@ def _route_net_with_obstacles_impl(pcb_data: PCBData, net_id: int, config: GridR
     # keeping them strictly inside the window keeps the fence solid (#396).
     def _exempt_ok(gx, gy):
         return bounds is None or (bounds[0] <= gx <= bounds[2] and bounds[1] <= gy <= bounds[3])
-    allow_radius = 10
+    allow_radius = ENDPOINT_ALLOW_RADIUS_CELLS
     # The exemption block is a rectangle and `bounds` is a rectangle, so CLIP the
     # ranges once per terminal instead of testing every cell. Same cells in the
     # same order -- the predicate was a pure bounds test, so intersecting the

@@ -58,7 +58,8 @@ def setup_bga_exclusion_zones(
     pcb_data: PCBData,
     disable_bga_zones: Optional[List[str]],
     existing_zones: Optional[List[Tuple[float, float, float, float]]] = None,
-    selected_net_ids: Optional[List[int]] = None
+    selected_net_ids: Optional[List[int]] = None,
+    endpoint_window_mm: Optional[float] = None
 ) -> List[Tuple[float, float, float, float, float]]:
     """
     Handle --no-bga-zones argument and auto-detect BGA exclusion zones.
@@ -68,6 +69,12 @@ def setup_bga_exclusion_zones(
         disable_bga_zones: List from --no-bga-zones argument (None=auto-detect,
                           []=disable all, ['U1','U3']=disable specific)
         existing_zones: Pre-configured zones (if any)
+        endpoint_window_mm: How far from a terminal a route may cross a zone
+                          (the endpoint allowed-cell window, in mm). A ball of
+                          a selected net whose own copper ends deeper inside
+                          the zone than this is entombed as a bare ball is,
+                          and disables the zone the same way. None skips the
+                          test.
 
     Returns:
         List of BGA exclusion zone tuples (x1, y1, x2, y2, edge_tolerance)
@@ -136,6 +143,80 @@ def setup_bga_exclusion_zones(
                         if abs(_x - _p.global_x) < 0.05 and abs(_y - _p.global_y) < 0.05:
                             return False
                     return True
+
+                _items_by_net = {}
+                for _s in pcb_data.segments:
+                    if _s.net_id in _sel:
+                        _items_by_net.setdefault(_s.net_id, []).append(
+                            ((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)))
+                for _v in pcb_data.vias:
+                    if _v.net_id in _sel:
+                        _items_by_net.setdefault(_v.net_id, []).append(
+                            ((_v.x, _v.y),))
+
+                _comps_by_net = {}
+
+                def _net_comps(_nid):
+                    """The net's copper as connected point sets: items
+                    sharing a point (0.05 mm, the _ball_bare tolerance)."""
+                    if _nid in _comps_by_net:
+                        return _comps_by_net[_nid]
+                    _items = _items_by_net.get(_nid, [])
+                    _parent = list(range(len(_items)))
+
+                    def _find(_i):
+                        while _parent[_i] != _i:
+                            _parent[_i] = _parent[_parent[_i]]
+                            _i = _parent[_i]
+                        return _i
+                    _cells = {}
+                    for _i, _it in enumerate(_items):
+                        for (_x, _y) in _it:
+                            _k = (round(_x / 0.05), round(_y / 0.05))
+                            for _dx in (-1, 0, 1):
+                                for _dy in (-1, 0, 1):
+                                    for _j in _cells.get((_k[0] + _dx, _k[1] + _dy), ()):
+                                        _parent[_find(_i)] = _find(_j)
+                            _cells.setdefault(_k, []).append(_i)
+                    _groups = {}
+                    for _i, _it in enumerate(_items):
+                        _groups.setdefault(_find(_i), []).extend(_it)
+                    _comps_by_net[_nid] = list(_groups.values())
+                    return _comps_by_net[_nid]
+
+                def _ball_copper(_p):
+                    """The points of the copper joined to ball `_p`: its stub
+                    and via (a dog-bone), or a via in the pad. A route of the
+                    net launches from these."""
+                    _r = max(min(_p.size_x, _p.size_y) / 2, 0.05)
+                    return [_q for _c in _net_comps(_p.net_id)
+                            if any(abs(_x - _p.global_x) <= _r
+                                   and abs(_y - _p.global_y) <= _r
+                                   for (_x, _y) in _c)
+                            for _q in _c]
+
+                def _depth(_x, _y, _x0, _y0, _x1, _y1):
+                    return min(_x - _x0, _x1 - _x, _y - _y0, _y1 - _y)
+                # #472's "bare ball" test, widened to a ball whose fanout
+                # copper never leaves the zone: a dog-bone (stub + via) under
+                # the part. The route of its net launches from that via on an
+                # inner layer, and the zone blocks every layer; only the
+                # endpoint window (endpoint_window_mm) is open, so a via
+                # deeper than that is as entombed as a bare ball.
+                _entombed_copper = {}
+                if endpoint_window_mm is not None and endpoint_window_mm > 0:
+                    for fp, zone in zip(bga_components, bga_exclusion_zones):
+                        _x0, _y0, _x1, _y1 = zone[:4]
+                        for _p in fp.pads:
+                            if (_p.net_id not in _sel or _p.drill
+                                    or _depth(_p.global_x, _p.global_y,
+                                              _x0, _y0, _x1, _y1) <= endpoint_window_mm):
+                                continue
+                            _cu = _ball_copper(_p)
+                            if _cu and min(_depth(_x, _y, _x0, _y0, _x1, _y1)
+                                           for (_x, _y) in _cu) > endpoint_window_mm:
+                                _entombed_copper.setdefault(fp.reference, set()).add(
+                                    _p.net_name)
                 _keep, _keep_fps = [], []
                 for fp, zone in zip(bga_components, bga_exclusion_zones):
                     # Only balls ENTOMBED beyond the zone's edge-tolerance
@@ -150,10 +231,17 @@ def setup_bga_exclusion_zones(
                                             _p.global_y - _y0, _y1 - _p.global_y)
                                     > _tol + 0.65
                                     and _ball_bare(_p)})
+                    _deep = sorted(_entombed_copper.get(fp.reference, ()))
                     if _bare:
                         print(f"  {fp.reference}: zone DISABLED -- bare ball(s) of "
                               f"selected net(s) inside it ({', '.join(_bare[:6])}"
                               f"{', ...' if len(_bare) > 6 else ''}) (#472)")
+                    elif _deep:
+                        print(f"  {fp.reference}: zone DISABLED -- the fanout copper of "
+                              f"{len(_deep)} selected net(s) ends inside it, more than "
+                              f"{endpoint_window_mm:.2f} mm from its edge, where a "
+                              f"route cannot leave it ({', '.join(_deep[:6])}"
+                              f"{', ...' if len(_deep) > 6 else ''})")
                     else:
                         _keep.append(zone)
                         _keep_fps.append(fp)

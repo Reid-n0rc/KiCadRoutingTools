@@ -75,7 +75,8 @@ from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, update_net_obstacles_after_routing
 )
 from single_ended_routing import (route_net_with_obstacles,
-                                   route_multipoint_taps, build_corridor_waypoints)
+                                   route_multipoint_taps, build_corridor_waypoints,
+                                   ENDPOINT_ALLOW_RADIUS_CELLS)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
 from layer_swap_optimization import apply_single_ended_layer_swaps
@@ -3424,7 +3425,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _sel_ids = [nid for _nm, nid in _targets]
     bga_exclusion_zones = setup_bga_exclusion_zones(
         pcb_data, disable_bga_zones, bga_exclusion_zones,
-        selected_net_ids=_sel_ids)
+        selected_net_ids=_sel_ids,
+        endpoint_window_mm=ENDPOINT_ALLOW_RADIUS_CELLS * grid_step)
 
     if final_reconcile and abs(routing_clearance_margin - 1.0) > 1e-9:
         # #1216: say what the knob reaches. It used to read as a general
